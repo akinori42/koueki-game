@@ -69,7 +69,23 @@ button.b:disabled { opacity: .35; }
 
 /* 地図 */
 canvas { display: block; width: 100%; border-radius: 10px; }
-.mapwrap { border: 1px solid #2b4a66; border-radius: 10px; overflow: hidden; margin-bottom: 10px; }
+.mapwrap { position: relative; border: 1px solid #2b4a66; border-radius: 10px; overflow: hidden; margin-bottom: 6px; background: #1d4a68; }
+#map { touch-action: none; cursor: grab; }
+.mapbtns { position: absolute; right: 8px; top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.mapbtns button {
+  width: 44px; height: 44px; border-radius: 10px; border: 1px solid #4a6a88;
+  background: rgba(11, 26, 41, .85); color: #f1e7d0; font-size: 20px; font-weight: 700; font-family: inherit;
+}
+.mapbtns button:active { background: #2f5b84; }
+.legend { margin: 0 0 8px; line-height: 1.7; }
+.lg { display: inline-block; width: 10px; height: 10px; border: 1px solid #0b1a29; border-radius: 2px; margin: 0 2px 0 6px; vertical-align: -1px; }
+.lnk { font-size: 11px; font-weight: 400; color: #8fc1ea; text-decoration: underline; margin-left: 4px; }
+.rumor { font-size: 13px; line-height: 1.7; }
+details.card summary { font-weight: 700; padding: 6px 0; cursor: pointer; }
+details.card tr[data-a] td:first-child { text-decoration: underline; text-decoration-color: #4a6a88; }
+.hud1 span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; padding-right: 8px; }
+.hud1 .gold { flex-shrink: 0; }
+.hud2 span { white-space: nowrap; }
 
 table.t { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
 table.t th { text-align: right; font-weight: 400; color: #a9b9c7; font-size: 11px; padding: 2px 4px; }

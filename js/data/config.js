@@ -15,8 +15,29 @@ DATA.CONFIG = {
   sellRate: 0.9,          // 売値 = 相場 × この値
   devMin: -0.6,           // 相場の下がり幅の限界
   devMax: 1.5,            // 相場の上がり幅の限界
-  devDecay: 0.96,         // 1日ごとに相場が元へ戻る割合
-  devNoise: 0.012,        // 1日ごとの相場のゆらぎ
+  devDecay: 0.98,         // 1日ごとに相場が元へ戻る割合（1に近いほど戻りが遅い＝同じ航路の繰り返しが効かなくなる）
+  devNoise: 0.01,         // 1日ごとの相場のゆらぎ
+
+  // 産地に近い港での値段の上限：産地の倍率 ×（nearCapBase + 産地からの海里 ÷ nearCapDist）
+  // nearCapDist を小さくすると、近場の交易でももうかりやすくなる
+  nearCapBase: 1.15,
+  nearCapDist: 1100,
+
+  // 市況の変化（ある港である品が一時的に高騰／値崩れする）
+  trendMax: 14,           // 同時に起きている数の上限
+  trendChance: 0.2,       // 1日に新しく起きる確率
+  trendDays: [50, 140],   // 続く日数の幅
+  trendUp: [1.35, 1.8],   // 高騰の倍率の幅
+  trendDown: [0.6, 0.8],  // 値崩れの倍率の幅
+
+  // 地図
+  maxLeg: 1500,           // 中継点どうしを直線で結ぶ最大距離（海里）
+  zoomMin: 3.2,           // 縮小の限界（緯度1度あたりのピクセル）
+  zoomMax: 44,            // 拡大の限界
+  zoomStart: 12,
+
+  // 地図上を動く他の船（見た目だけ。数を減らすと軽くなる）
+  npc: { merchant: 26, galley: 6, fisher: 10, pirate: 8, warship: 4, speed: 22 },
 
   foodPrice: 3,           // 食料1樽の買値
   foodSell: 1,            // 食料1樽の売値

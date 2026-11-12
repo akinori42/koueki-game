@@ -4,8 +4,10 @@
 
   const D = window.DATA;
   const C = D.CONFIG;
-  const SAVE_KEY = 'kaze-to-ho-save-v1';
+  const SAVE_KEY = 'kaze-to-ho-save-v1';   // 保存場所の名前（中身の版は S.v で見分ける）
+  const SAVE_VERSION = 2;
   const WIND_NAME = { tail: '追い風', side: '横風', head: '向かい風' };
+  const MED = ['wmed', 'adri', 'emed', 'levant', 'nafrica', 'black'];
 
   let S = null;                 // セーブされる状態
   let ui = { tab: 'trade', dest: null };
@@ -16,6 +18,7 @@
   const $ = (s) => document.querySelector(s);
   const rnd = (a, b) => a + Math.random() * (b - a);
   const rndi = (a, b) => Math.floor(rnd(a, b + 1));
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const fmt = (n) => Math.round(n).toLocaleString('ja-JP');
   const G = (n) => `<span class="gold">${fmt(n)}G</span>`;
@@ -33,6 +36,7 @@
   }
   function nextEra() { return D.ERAS.find((e) => e.year > year()); }
   function shipUnlocked(t) { const e = eraOf(t.era); return !e || e.year <= year(); }
+  function regionName(pid) { const r = D.REGIONS[D.PORTS[pid].region]; return r ? r.name : ''; }
 
   function toast(msg) {
     const t = $('#toast');
@@ -44,18 +48,29 @@
   // ---------- セーブ ----------
   function newGame() {
     S = {
-      v: 1, gold: C.startGold, day: 0, port: C.startPort,
+      v: SAVE_VERSION, gold: C.startGold, day: 0, port: C.startPort,
       ship: newShip(C.startShip, C.startCrew),
-      cargo: {}, food: C.startFood, market: {}, known: {},
+      cargo: {}, food: C.startFood, market: {}, known: {}, found: null, trends: [],
       erasSeen: D.ERAS.filter((e) => e.year <= C.startYear).map((e) => e.id),
       stats: { voyages: 0, wins: 0, profit: 0 }
     };
     fillMissing();
+    for (let i = 0; i < 8; i++) spawnTrend();
     recordKnown(S.port);
+    npcs = [];
   }
   function newShip(type, crew) {
     const t = D.SHIPS[type];
     return { type, sail: t.sail, up: {}, hp: 100, guns: 0, crew: clamp(crew, C.minCrewAbs, t.maxCrew), invested: 0 };
+  }
+  // 版1（港8・品物8のころ）のセーブを今の形に直す
+  function migrate(o) {
+    if (o.v === 1) {
+      o.v = 2;
+      o.found = null;     // fillMissing が、訪れた港から発見済みの港を決め直す
+      o.trends = [];
+    }
+    return o.v === SAVE_VERSION ? o : null;
   }
   // データに港や品物が後から足されても、古いセーブで動くように穴を埋める
   function fillMissing() {
@@ -69,6 +84,20 @@
     if (!D.SHIPS[S.ship.type]) S.ship = newShip(C.startShip, S.ship.crew || C.startCrew);
     if (!D.SAILS[S.ship.sail]) S.ship.sail = D.SHIPS[S.ship.type].sail;
     if (!D.PORTS[S.port]) S.port = C.startPort;
+    S.known = S.known || {};
+    for (const pid in S.known) {
+      if (!D.PORTS[pid]) { delete S.known[pid]; continue; }
+      S.known[pid].prices = S.known[pid].prices || {};
+      S.known[pid].buys = S.known[pid].buys || {};
+    }
+    S.trends = (S.trends || []).filter((t) => D.PORTS[t.p] && D.GOODS[t.g]);
+    // 発見済みの港：隠れていない港すべて ＋ これまで訪れた港で噂を聞ける港
+    const found = new Set((S.found || []).filter((p) => D.PORTS[p]));
+    for (const pid in D.PORTS) if (!D.PORTS[pid].hidden) found.add(pid);
+    found.add(S.port);
+    for (const pid in S.known) found.add(pid);
+    S.found = [...found];
+    for (const pid of Object.keys(S.known).concat(S.port)) hearRumors(pid, true);
   }
   function save() {
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); } catch (e) { /* 保存できない環境でも遊べる */ }
@@ -77,12 +106,39 @@
     try {
       const raw = localStorage.getItem(SAVE_KEY);
       if (!raw) return false;
-      const o = JSON.parse(raw);
-      if (!o || o.v !== 1) return false;
-      S = o; fillMissing();
+      let o = JSON.parse(raw);
+      if (!o || typeof o.v !== 'number') return false;
+      if (o.v !== SAVE_VERSION) {
+        try { localStorage.setItem(SAVE_KEY + '-backup-v' + o.v, raw); } catch (e) { /* 控えが取れなくても続ける */ }
+        o = migrate(o);
+        if (!o) return false;
+      }
+      S = o; fillMissing(); npcs = [];
       return true;
     } catch (e) { return false; }
   }
+
+  // ---------- 港の発見 ----------
+  // pid に入港したとき、そこで噂が聞ける隠れ港を発見する
+  function hearRumors(pid, silent) {
+    const got = [];
+    for (const id in D.PORTS) {
+      const p = D.PORTS[id];
+      if (p.hidden && p.heardAt && p.heardAt.includes(pid) && !S.found.includes(id)) { S.found.push(id); got.push(id); }
+    }
+    if (!silent) {
+      for (const id of got) {
+        const p = D.PORTS[id];
+        notices.push({
+          title: '🧭 船乗りの噂', label: '海図に書きこむ',
+          body: `<p>酒場で耳よりな話を聞いた。</p><p><b>${p.name}</b>（${regionName(id)}）<br><span class="sub">${p.desc}</span></p>` +
+            `<p class="sub">特産：${sellList(id)}</p><p>海図に新しい港が加わった。</p>`
+        });
+      }
+    }
+    return got;
+  }
+  function sellList(pid) { return Object.keys(D.PORTS[pid].sells || {}).map((g) => D.GOODS[g].name).join('・') || 'なし'; }
 
   // ---------- 船の性能 ----------
   function spec(sh) {
@@ -105,7 +161,25 @@
   function playerPower() { return S.ship.guns * 4 + S.ship.crew * 0.5; }
 
   // ---------- 相場 ----------
-  function mult(pid, gid) { const m = D.PORTS[pid].prices[gid]; return typeof m === 'number' ? m : 1; }
+  function sells(pid, gid) { const s = D.PORTS[pid].sells; return !!s && s[gid] != null; }
+  // 港と品の基本の倍率（産地 → 特に欲しがる品 → 地域の傾向 → 1.0 の順に探す）
+  function rawMult(pid, gid) {
+    const p = D.PORTS[pid];
+    if (p.sells && p.sells[gid] != null) return p.sells[gid];
+    if (p.wants && p.wants[gid] != null) return p.wants[gid];
+    const r = D.REGIONS[p.region];
+    return (r && r.prices[gid]) || 1;
+  }
+  // 産地に近い港では、その品は高くならない（近場の往復だけで大もうけできないようにする）
+  function baseMult(pid, gid) {
+    const raw = rawMult(pid, gid), cap = nearCap[pid][gid];
+    return cap !== undefined && cap < raw ? cap : raw;
+  }
+  function trendOf(pid, gid) {
+    for (const t of S.trends) if (t.p === pid && t.g === gid) return t;
+    return null;
+  }
+  function mult(pid, gid) { const t = trendOf(pid, gid); return baseMult(pid, gid) * (t ? t.m : 1); }
   function step(pid, gid) { return 1 / (D.GOODS[gid].depth * D.PORTS[pid].size); }
   function unitBuy(pid, gid, dev) { return Math.max(1, Math.ceil(D.GOODS[gid].base * mult(pid, gid) * (1 + dev))); }
   function unitSell(pid, gid, dev) { return Math.max(1, Math.floor(D.GOODS[gid].base * mult(pid, gid) * (1 + dev) * C.sellRate)); }
@@ -132,6 +206,15 @@
     }
     return n;
   }
+  // 市況の変化を1つ起こす（発見済みの港のどこかで、ある品が高騰／値崩れ）
+  function spawnTrend() {
+    if (S.trends.length >= C.trendMax) return;
+    const p = pick(S.found), g = pick(Object.keys(D.GOODS));
+    if (trendOf(p, g)) return;
+    const down = sells(p, g) ? true : Math.random() < 0.25;
+    const range = down ? C.trendDown : C.trendUp;
+    S.trends.push({ p, g, m: +rnd(range[0], range[1]).toFixed(2), until: S.day + rndi(C.trendDays[0], C.trendDays[1]) });
+  }
   function advanceMarket(days) {
     for (let d = 0; d < days; d++) {
       for (const pid in S.market) {
@@ -139,48 +222,143 @@
         for (const gid in m) m[gid] = clamp(m[gid] * C.devDecay + rnd(-C.devNoise, C.devNoise), C.devMin, C.devMax);
       }
     }
+    S.trends = S.trends.filter((t) => t.until > S.day);
+    for (let d = 0; d < days; d++) if (Math.random() < C.trendChance) spawnTrend();
   }
   function recordKnown(pid) {
-    const prices = {};
-    for (const gid in D.GOODS) prices[gid] = sellNow(pid, gid);
-    S.known[pid] = { day: S.day, prices };
+    const prices = {}, buys = {};
+    for (const gid in D.GOODS) {
+      prices[gid] = sellNow(pid, gid);
+      if (sells(pid, gid)) buys[gid] = buyNow(pid, gid);
+    }
+    S.known[pid] = { day: S.day, prices, buys };
+  }
+  function trendLine(t) {
+    const up = t.m > 1, left = Math.max(1, t.until - S.day);
+    return `<div class="${up ? 'good' : 'bad'}">${up ? '📈' : '📉'} ${D.PORTS[t.p].name}：${D.GOODS[t.g].name}が${up ? '高騰' : '値崩れ'}` +
+      `<span class="sub">（あと約${left}日）</span></div>`;
   }
 
-  // ---------- 航路 ----------
-  const KX = 60 * 0.77, KY = 60; // 経度・緯度1度あたりの海里
-  function nm(a, b) { return Math.hypot((a[0] - b[0]) * KX, (a[1] - b[1]) * KY); }
+  // ---------- 陸と海の判定・航路 ----------
+  const LAND = D.MAP.LAND.map((pts) => {
+    let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (const p of pts) { x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); }
+    return { pts, x0, x1, y0, y1 };
+  });
+  function inLand(p) {
+    for (const L of LAND) {
+      if (p[0] < L.x0 || p[0] > L.x1 || p[1] < L.y0 || p[1] > L.y1) continue;
+      let inside = false;
+      const a = L.pts;
+      for (let i = 0, j = a.length - 1; i < a.length; j = i++) {
+        if ((a[i][1] > p[1]) !== (a[j][1] > p[1]) &&
+          p[0] < (a[j][0] - a[i][0]) * (p[1] - a[i][1]) / (a[j][1] - a[i][1]) + a[i][0]) inside = !inside;
+      }
+      if (inside) return true;
+    }
+    return false;
+  }
+  function cross(a, b, c) { return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]); }
+  // a-b の直線が陸を横切らなければ true
+  function clearLine(a, b) {
+    const sx0 = Math.min(a[0], b[0]), sx1 = Math.max(a[0], b[0]), sy0 = Math.min(a[1], b[1]), sy1 = Math.max(a[1], b[1]);
+    for (const L of LAND) {
+      if (sx1 < L.x0 || sx0 > L.x1 || sy1 < L.y0 || sy0 > L.y1) continue;
+      const q = L.pts;
+      for (let i = 0, j = q.length - 1; i < q.length; j = i++) {
+        const c = q[j], d = q[i];
+        const d1 = cross(c, d, a), d2 = cross(c, d, b);
+        if (!((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0))) continue;
+        const d3 = cross(a, b, c), d4 = cross(a, b, d);
+        if ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)) return false;
+      }
+    }
+    return true;
+  }
+  function nm(a, b) {
+    const k = Math.cos((a[1] + b[1]) / 2 * Math.PI / 180);
+    return Math.hypot((a[0] - b[0]) * 60 * k, (a[1] - b[1]) * 60);
+  }
+  // 航路の網を作る：中継点どうし・港と中継点を、陸を横切らない直線で結ぶ
   const graph = (function () {
-    const pos = {}, adj = {};
-    const link = (a, b) => { (adj[a] = adj[a] || []).push(b); (adj[b] = adj[b] || []).push(a); };
-    for (const id in D.MAP.SEA_NODES) pos[id] = D.MAP.SEA_NODES[id];
-    for (const e of D.MAP.SEA_EDGES) link(e[0], e[1]);
-    for (const pid in D.PORTS) { pos['p:' + pid] = D.PORTS[pid].pos; link('p:' + pid, D.PORTS[pid].link); }
-    return { pos, adj };
+    const ids = [], pos = [], isPort = [], idx = {}, warnings = [];
+    for (const k in D.MAP.SEA_NODES) { idx[k] = ids.length; ids.push(k); pos.push(D.MAP.SEA_NODES[k]); isPort.push(false); }
+    const nNodes = ids.length;
+    for (const pid in D.PORTS) { idx['p:' + pid] = ids.length; ids.push('p:' + pid); pos.push(D.PORTS[pid].pos); isPort.push(true); }
+    const adj = ids.map(() => []);
+    const link = (i, j, d) => { adj[i].push([j, d]); adj[j].push([i, d]); };
+    for (let i = 0; i < nNodes; i++) {
+      for (let j = i + 1; j < nNodes; j++) {
+        const d = nm(pos[i], pos[j]);
+        if (d <= C.maxLeg && clearLine(pos[i], pos[j])) link(i, j, d);
+      }
+    }
+    for (let i = nNodes; i < ids.length; i++) {
+      const p = pos[i], onLand = inLand(p);
+      let best = -1, bd = 1e9, cnt = 0;
+      for (let j = 0; j < nNodes; j++) {
+        const d = nm(p, pos[j]);
+        if (d < bd) { bd = d; best = j; }
+        if (d > 700) continue;
+        let ok;
+        if (!onLand) ok = clearLine(p, pos[j]);
+        else { // 港が陸の形の内側にあるときは、少し沖へ出た点から調べる
+          const len = Math.hypot(pos[j][0] - p[0], pos[j][1] - p[1]) || 1;
+          const s = [p[0] + (pos[j][0] - p[0]) / len * 0.4, p[1] + (pos[j][1] - p[1]) / len * 0.4];
+          ok = !inLand(s) && clearLine(s, pos[j]);
+        }
+        if (ok) { link(i, j, d); cnt++; }
+      }
+      if (!cnt) { link(i, best, bd); warnings.push(ids[i]); } // どこにも出られない港は、いちばん近い中継点へつなぐ
+    }
+    return { ids, pos, isPort, idx, adj, nNodes, warnings };
   })();
-  const routeCache = {};
+  const ssspCache = {}, routeCache = {};
+  function sssp(pid) {
+    if (ssspCache[pid]) return ssspCache[pid];
+    const n = graph.ids.length, src = graph.idx['p:' + pid];
+    const dist = new Array(n).fill(Infinity), prev = new Array(n).fill(-1), done = new Array(n).fill(false);
+    dist[src] = 0;
+    for (;;) {
+      let u = -1;
+      for (let i = 0; i < n; i++) if (!done[i] && dist[i] < Infinity && (u < 0 || dist[i] < dist[u])) u = i;
+      if (u < 0) break;
+      done[u] = true;
+      if (graph.isPort[u] && u !== src) continue; // 他の港は通り抜けない
+      for (const e of graph.adj[u]) {
+        const nd = dist[u] + e[1];
+        if (nd < dist[e[0]]) { dist[e[0]] = nd; prev[e[0]] = u; }
+      }
+    }
+    return (ssspCache[pid] = { dist, prev });
+  }
   function route(from, to) {
     const key = from + '>' + to;
     if (routeCache[key]) return routeCache[key];
-    const src = 'p:' + from, dst = 'p:' + to;
-    const dist = { [src]: 0 }, prev = {}, done = {};
-    for (;;) {
-      let u = null;
-      for (const k in dist) if (!done[k] && (u === null || dist[k] < dist[u])) u = k;
-      if (u === null || u === dst) break;
-      done[u] = true;
-      for (const w of graph.adj[u] || []) {
-        if (w.startsWith('p:') && w !== dst) continue; // 他の港は通り抜けない
-        const nd = dist[u] + nm(graph.pos[u], graph.pos[w]);
-        if (dist[w] === undefined || nd < dist[w]) { dist[w] = nd; prev[w] = u; }
-      }
-    }
-    if (dist[dst] === undefined) return null;
+    const sp = sssp(from), dst = graph.idx['p:' + to];
+    if (dst == null || !isFinite(sp.dist[dst])) return null;
     const pts = [];
-    for (let k = dst; k; k = prev[k]) pts.unshift(graph.pos[k]);
+    for (let k = dst; k >= 0; k = sp.prev[k]) pts.unshift(graph.pos[k]);
     const cum = [0];
     for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + nm(pts[i - 1], pts[i]));
-    return (routeCache[key] = { pts, cum, total: dist[dst] });
+    return (routeCache[key] = { pts, cum, total: cum[cum.length - 1] });
   }
+  function seaDist(from, to) { return sssp(from).dist[graph.idx['p:' + to]]; }
+  // 産地からの距離で決まる値段の上限。産地の倍率 ×（nearCapBase + 距離 ÷ nearCapDist）
+  const nearCap = (function () {
+    const cap = {};
+    for (const pid in D.PORTS) cap[pid] = {};
+    for (const a in D.PORTS) {
+      const s = D.PORTS[a].sells || {}, gids = Object.keys(s);
+      if (!gids.length) continue;
+      for (const b in D.PORTS) {
+        if (a === b) continue;
+        const f = C.nearCapBase + seaDist(a, b) / C.nearCapDist;
+        for (const g of gids) { const v = s[g] * f; if (cap[b][g] === undefined || v < cap[b][g]) cap[b][g] = v; }
+      }
+    }
+    return cap;
+  })();
   function pointAt(r, d) {
     d = clamp(d, 0, r.total);
     for (let i = 1; i < r.pts.length; i++) {
@@ -196,60 +374,259 @@
     return Math.max(1, Math.ceil(r.total / (sp.speed * C.nmPerSpeed * 0.97 * crewFactor(sp))));
   }
 
-  // ---------- 地図を描く ----------
-  const V = D.MAP.VIEW;
-  const MAP_ASPECT = ((V.lonMax - V.lonMin) * 0.77) / (V.latMax - V.latMin);
+  // ---------- 地図 ----------
+  const V = D.MAP.VIEW, KXV = 0.8;      // KXV : 経度方向の縮み
+  let cam = { lon: D.PORTS[C.startPort].pos[0], lat: D.PORTS[C.startPort].pos[1], z: C.zoomStart };
+  let mv = null;                         // 今表示している地図 { cv, ctx, w, h, mode, layer, lctx, key }
+  let npcs = [];
+  let animOn = false, lastTs = 0, frameNo = 0;
+
+  function px(p) { return [mv.w / 2 + (p[0] - cam.lon) * cam.z * KXV, mv.h / 2 - (p[1] - cam.lat) * cam.z]; }
+  function clampCam() {
+    cam.z = clamp(cam.z, C.zoomMin, C.zoomMax);
+    cam.lon = clamp(cam.lon, V.lonMin, V.lonMax);
+    cam.lat = clamp(cam.lat, V.latMin, V.latMax);
+  }
+  function centerOn(pid) { const p = D.PORTS[pid].pos; cam.lon = p[0]; cam.lat = p[1]; }
   function setupCanvas(cv, h) {
-    const w = cv.clientWidth || 340, dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth || 340, dpr = Math.min(window.devicePixelRatio || 1, 2);
     cv.style.height = h + 'px';
     cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
     const ctx = cv.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return { ctx, w, h };
+    return { ctx, w, h, dpr };
   }
-  function proj(p, w, h) {
-    return [(p[0] - V.lonMin) / (V.lonMax - V.lonMin) * w, (V.latMax - p[1]) / (V.latMax - V.latMin) * h];
+  function openMap(cv, mode, frac) {
+    const h = clamp(Math.round((window.innerHeight || 700) * frac), 230, 520);
+    const { ctx, w, dpr } = setupCanvas(cv, h);
+    const layer = document.createElement('canvas');
+    layer.width = cv.width; layer.height = cv.height;
+    const lctx = layer.getContext('2d');
+    lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    mv = { cv, ctx, w, h, mode, layer, lctx, key: '' };
+    if (mode === 'sail') bindMapInput(cv);
+    if (!npcs.length) initNpcs();
+    drawFrame();
+    startAnim();
   }
-  function poly(ctx, pts, w, h) {
+  function mapOpts() {
+    if (voyage) return { here: voyage.from, dest: voyage.dest, route: voyage.r };
+    return { here: S.port, dest: ui.dest, route: ui.dest ? route(S.port, ui.dest) : null };
+  }
+  function path(ctx, pts) {
     ctx.beginPath();
-    pts.forEach((p, i) => { const q = proj(p, w, h); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); });
-    ctx.closePath();
+    for (let i = 0; i < pts.length; i++) { const q = px(pts[i]); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); }
   }
-  function drawMap(cv, o) {
-    const w0 = cv.clientWidth || 340;
-    const { ctx, w, h } = setupCanvas(cv, Math.round(w0 / MAP_ASPECT));
+  // 動かない部分（海・陸・港・航路）を描く。視点が変わったときだけ描き直す
+  function renderStatic(ctx, o) {
+    const w = mv.w, h = mv.h;
+    const lonHalf = w / 2 / (cam.z * KXV), latHalf = h / 2 / cam.z;
+    const vx0 = cam.lon - lonHalf, vx1 = cam.lon + lonHalf, vy0 = cam.lat - latHalf, vy1 = cam.lat + latHalf;
     ctx.fillStyle = '#1d4a68'; ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = '#c9b88a'; ctx.strokeStyle = '#7d6d48'; ctx.lineWidth = 1;
-    for (const l of D.MAP.LAND) { poly(ctx, l, w, h); ctx.fill(); ctx.stroke(); }
-    ctx.fillStyle = '#1d4a68';
-    for (const l of D.MAP.SEA) { poly(ctx, l, w, h); ctx.fill(); ctx.stroke(); }
+    const vis = LAND.filter((L) => !(L.x1 < vx0 || L.x0 > vx1 || L.y1 < vy0 || L.y0 > vy1));
+    ctx.lineJoin = 'round'; ctx.strokeStyle = '#6f6040'; ctx.lineWidth = 2.5;
+    for (const L of vis) { path(ctx, L.pts); ctx.closePath(); ctx.stroke(); }
+    ctx.fillStyle = '#c9b88a';
+    for (const L of vis) { path(ctx, L.pts); ctx.closePath(); ctx.fill(); }
 
     if (o.route) {
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      o.route.pts.forEach((p, i) => { const q = proj(p, w, h); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); });
-      ctx.stroke(); ctx.setLineDash([]);
+      path(ctx, o.route.pts); ctx.stroke(); ctx.setLineDash([]);
     }
+    // 港。大事な港から順に名前を置き、重なる名前は省く
+    const list = S.found.filter((pid) => {
+      const p = D.PORTS[pid].pos;
+      return p[0] > vx0 - 2 && p[0] < vx1 + 2 && p[1] > vy0 - 2 && p[1] < vy1 + 2;
+    }).sort((a, b) => rank(b) - rank(a));
+    function rank(pid) { return (pid === o.here ? 100 : 0) + (pid === o.dest ? 90 : 0) + D.PORTS[pid].size; }
+    const boxes = [];
+    const r0 = cam.z < 6 ? 2.5 : 4;
     ctx.font = 'bold 10px sans-serif'; ctx.textBaseline = 'middle';
-    for (const pid in D.PORTS) {
-      const p = D.PORTS[pid], q = proj(p.pos, w, h);
-      const here = pid === o.here, sel = pid === o.dest;
-      ctx.beginPath(); ctx.arc(q[0], q[1], sel || here ? 6 : 4.5, 0, 7);
+    for (const pid of list) {
+      const p = D.PORTS[pid], q = px(p.pos), here = pid === o.here, sel = pid === o.dest;
+      ctx.beginPath(); ctx.arc(q[0], q[1], sel || here ? r0 + 2 : r0, 0, 7);
       ctx.fillStyle = sel ? '#ff6b4a' : here ? '#e0b04a' : '#fff';
-      ctx.fill(); ctx.strokeStyle = '#1a1205'; ctx.lineWidth = 1.5; ctx.stroke();
-      const lb = p.label || [7, 0, 'left'];
-      ctx.textAlign = lb[2];
-      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,24,38,.85)';
-      ctx.strokeText(p.name, q[0] + lb[0], q[1] + lb[1]);
-      ctx.fillStyle = sel ? '#ffb39f' : here ? '#ffd98a' : '#fff';
-      ctx.fillText(p.name, q[0] + lb[0], q[1] + lb[1]);
+      ctx.fill(); ctx.strokeStyle = '#1a1205'; ctx.lineWidth = 1.2; ctx.stroke();
+      const must = here || sel;
+      if (!must && !(cam.z >= 9 || (cam.z >= 5.5 && p.size >= 1.2))) continue;
+      const tw = p.name.length * 10 + 4;
+      let placed = null;
+      for (const side of [1, -1]) {
+        const bx = side > 0 ? q[0] + 7 : q[0] - 7 - tw, box = [bx, q[1] - 7, bx + tw, q[1] + 7];
+        if (!boxes.some((b) => box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1])) { placed = { side, box }; break; }
+      }
+      if (!placed && must) placed = { side: 1, box: [q[0] + 7, q[1] - 7, q[0] + 7 + tw, q[1] + 7] };
+      if (!placed) continue;
+      boxes.push(placed.box);
+      ctx.textAlign = placed.side > 0 ? 'left' : 'right';
+      const tx = q[0] + placed.side * 7;
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,24,38,.85)'; ctx.strokeText(p.name, tx, q[1]);
+      ctx.fillStyle = sel ? '#ffb39f' : here ? '#ffd98a' : '#fff'; ctx.fillText(p.name, tx, q[1]);
     }
-    if (o.ship) {
-      const q = proj(o.ship, w, h);
-      ctx.font = '18px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText('⛵', q[0], q[1] - 2);
+  }
+
+  // 小さな船の絵。kind で帆の色と形が変わる
+  const BOAT = {
+    merchant: { hull: '#6b4423', sail: '#fbf3df' },
+    galley: { hull: '#6b4423', sail: '#e6c36a' },
+    fisher: { hull: '#8a6a45', sail: '#cdb892' },
+    pirate: { hull: '#1c1c1c', sail: '#1c1c1c' },
+    warship: { hull: '#4a2a1a', sail: '#c9413a' },
+    player: { hull: '#7a4a22', sail: '#ffffff' }
+  };
+  function drawBoat(ctx, x, y, s, face, kind) {
+    const b = BOAT[kind];
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(face * s, s);
+    if (kind === 'player') {
+      ctx.beginPath(); ctx.arc(0, -3, 12, 0, 7);
+      ctx.fillStyle = 'rgba(224,176,74,.28)'; ctx.fill();
     }
-    return { w, h };
+    ctx.fillStyle = b.hull;
+    ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(7, 0); ctx.lineTo(4, 3.5); ctx.lineTo(-4, 3.5); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = b.sail;
+    ctx.beginPath();
+    if (kind === 'galley' || kind === 'fisher') { ctx.moveTo(-4, -1); ctx.lineTo(4, -9); ctx.lineTo(3, -1); } // 三角帆
+    else { ctx.moveTo(-3.5, -9); ctx.lineTo(3.5, -9); ctx.lineTo(4, -1.5); ctx.lineTo(-4, -1.5); }           // 横帆
+    ctx.closePath(); ctx.fill();
+    if (kind === 'pirate') { ctx.strokeStyle = '#ff5a4a'; ctx.lineWidth = 1; ctx.stroke(); ctx.fillStyle = '#ff5a4a'; ctx.fillRect(-1, -12, 4, 2.5); }
+    if (kind === 'warship') { ctx.fillStyle = '#f4d35e'; ctx.fillRect(-1, -12, 4, 2.5); }
+    if (kind === 'player') { ctx.fillStyle = '#2f6fd0'; ctx.fillRect(-1, -12.5, 5, 3); }
+    if (kind === 'galley') { ctx.strokeStyle = '#3a2a18'; ctx.lineWidth = 0.8; ctx.beginPath(); for (let i = -3; i <= 3; i += 3) { ctx.moveTo(i, 2); ctx.lineTo(i - 1.5, 6); } ctx.stroke(); }
+    ctx.restore();
+  }
+
+  // ---------- 地図上の他の船（見た目だけ） ----------
+  function npcPool(kind) {
+    if (kind === 'galley') return S.found.filter((p) => MED.includes(D.PORTS[p].region));
+    if (kind === 'warship') return S.found.filter((p) => D.PORTS[p].shipyard);
+    return S.found;
+  }
+  function npcLeg(n) {
+    const pool = npcPool(n.kind);
+    const from = n.at && pool.includes(n.at) ? n.at : pick(pool);
+    let to = null;
+    for (let i = 0; i < 12 && !to; i++) {
+      const c = pick(pool);
+      if (c !== from && seaDist(from, c) < (n.kind === 'fisher' ? 99999 : 2200)) to = c;
+    }
+    if (!to) to = pool.find((c) => c !== from) || from;
+    n.r = route(from, to) || route(to, from);
+    n.at = to; n.dir = 1; n.turns = 0;
+    const T = n.r ? n.r.total : 0;
+    if (n.kind === 'fisher') { n.lo = Math.min(8, T * 0.1); n.hi = Math.min(T * 0.6, rnd(40, 110)); n.at = from; }
+    else if (n.kind === 'pirate') { n.lo = T * 0.2; n.hi = T * 0.8; }
+    else { n.lo = 0; n.hi = T; }
+    n.d = n.lo;
+  }
+  function initNpcs() {
+    npcs = [];
+    const sp = C.npc.speed, v = { merchant: sp, galley: sp * 1.1, fisher: sp * 0.3, pirate: sp * 1.2, warship: sp * 1.15 };
+    for (const kind of ['merchant', 'galley', 'fisher', 'pirate', 'warship']) {
+      for (let i = 0; i < (C.npc[kind] || 0); i++) {
+        const n = { kind, v: v[kind] * rnd(0.8, 1.2), face: 1, x: null };
+        npcLeg(n);
+        if (!n.r) continue;
+        n.d = rnd(n.lo, n.hi);
+        npcs.push(n);
+      }
+    }
+  }
+  function stepNpcs(dt) {
+    for (const n of npcs) {
+      n.d += n.dir * n.v * dt;
+      if (n.d >= n.hi) {
+        if (n.kind === 'fisher' || n.kind === 'pirate') { n.d = n.hi; n.dir = -1; if (++n.turns > 5) npcLeg(n); }
+        else npcLeg(n);
+      } else if (n.d <= n.lo && n.dir < 0) { n.d = n.lo; n.dir = 1; if (++n.turns > 5) npcLeg(n); }
+      // 進む向き（東か西か）で船の絵を左右に向ける
+      const p = pointAt(n.r, n.d);
+      if (n.p && Math.abs(p[0] - n.p[0]) > 1e-5) n.face = p[0] > n.p[0] ? 1 : -1;
+      n.p = p;
+    }
+  }
+  function drawFrame() {
+    if (!mv) return;
+    const o = mapOpts();
+    if (voyage) { // 航海中は自分の船を追いかける
+      voyage.shown += (voyage.done - voyage.shown) * 0.3;
+      const p = pointAt(voyage.r, voyage.shown);
+      cam.lon = p[0]; cam.lat = p[1];
+    }
+    clampCam();
+    const key = [cam.lon.toFixed(3), cam.lat.toFixed(3), cam.z.toFixed(2), o.here, o.dest, S.found.length].join('|');
+    if (key !== mv.key) { renderStatic(mv.lctx, o); mv.key = key; }
+    const ctx = mv.ctx;
+    ctx.drawImage(mv.layer, 0, 0, mv.w, mv.h);
+    const s = clamp(cam.z / 12, 0.65, 1.25);
+    for (const n of npcs) {
+      const q = px(n.p || pointAt(n.r, n.d));
+      if (q[0] < -12 || q[0] > mv.w + 12 || q[1] < -12 || q[1] > mv.h + 12) continue;
+      drawBoat(ctx, q[0], q[1], n.kind === 'fisher' ? s * 0.7 : s, n.face, n.kind);
+    }
+    if (voyage) {
+      const a = pointAt(voyage.r, voyage.shown), b = pointAt(voyage.r, voyage.shown + 5), q = px(a);
+      drawBoat(ctx, q[0], q[1], 1.5, b[0] >= a[0] ? 1 : -1, 'player');
+    } else {
+      const q = px(D.PORTS[S.port].pos);
+      drawBoat(ctx, q[0], q[1] - 9, 1.2, 1, 'player');
+    }
+  }
+  function startAnim() {
+    if (animOn) return;
+    animOn = true; lastTs = 0;
+    requestAnimationFrame(animLoop);
+  }
+  function animLoop(ts) {
+    if (!mv || !mv.cv.isConnected) { animOn = false; mv = null; return; }
+    const dt = lastTs ? Math.min(0.1, (ts - lastTs) / 1000) : 0;
+    lastTs = ts;
+    stepNpcs(dt);
+    if (++frameNo % 2 === 0) drawFrame();   // 1コマおきに描いて軽くする
+    requestAnimationFrame(animLoop);
+  }
+  function setZoom(z) { cam.z = clamp(z, C.zoomMin, C.zoomMax); }
+  // 指での操作：1本でずらす、2本で拡大縮小、軽くタップで港を選ぶ
+  function bindMapInput(cv) {
+    const pts = new Map();
+    let moved = 0, pinch = 0;
+    const gap = () => { const a = [...pts.values()]; return Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); };
+    cv.onpointerdown = (e) => {
+      if (cv.setPointerCapture) { try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 古い端末では無視 */ } }
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 1) moved = 0;
+      if (pts.size === 2) pinch = gap();
+    };
+    cv.onpointermove = (e) => {
+      const p = pts.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      if (pts.size === 1) {
+        moved += Math.abs(dx) + Math.abs(dy);
+        cam.lon -= dx / (cam.z * KXV); cam.lat += dy / cam.z;
+      } else if (pts.size === 2) {
+        const g = gap();
+        if (pinch > 0) setZoom(cam.z * g / pinch);
+        pinch = g; moved = 99;
+      }
+    };
+    const up = (e) => {
+      const had = pts.delete(e.pointerId);
+      if (had && pts.size === 0 && moved < 10 && e.type === 'pointerup') tapMap(e.clientX, e.clientY);
+    };
+    cv.onpointerup = up; cv.onpointercancel = up;
+    cv.onwheel = (e) => { e.preventDefault(); setZoom(cam.z * (e.deltaY < 0 ? 1.15 : 0.87)); };
+  }
+  function tapMap(cx, cy) {
+    if (!mv) return;
+    const rc = mv.cv.getBoundingClientRect(), x = cx - rc.left, y = cy - rc.top;
+    let best = null, bd = 26;
+    for (const pid of S.found) {
+      const q = px(D.PORTS[pid].pos), d = Math.hypot(q[0] - x, q[1] - y);
+      if (d < bd) { bd = d; best = pid; }
+    }
+    if (best && best !== S.port) { ui.dest = best; render(); }
   }
 
   // ---------- モーダル ----------
@@ -306,8 +683,9 @@
     $('#tabs').innerHTML = TABS.map((t) =>
       `<button data-a="tab" data-id="${t.id}" class="${ui.tab === t.id ? 'on' : ''}"><span class="ic">${t.ic}</span>${t.name}</button>`).join('');
     const m = $('#main');
+    mv = null;
     if (ui.tab === 'trade') m.innerHTML = viewTrade();
-    else if (ui.tab === 'sail') { m.innerHTML = viewSail(); drawSailMap(); }
+    else if (ui.tab === 'sail') { m.innerHTML = viewSail(); const cv = $('#map'); if (cv) openMap(cv, 'sail', 0.46); }
     else if (ui.tab === 'dock') m.innerHTML = viewDock();
     else m.innerHTML = viewInfo();
   }
@@ -323,92 +701,108 @@
       `<span class="${S.ship.hp < 40 ? 'bad' : ''}">🛠 ${Math.round(S.ship.hp)}%</span></div>`;
   }
 
+  function goodCard(gid) {
+    const g = D.GOODS[gid], can = sells(S.port, gid), own = S.cargo[gid];
+    const sp = sellNow(S.port, gid), tr = trendOf(S.port, gid);
+    let l2 = can ? `買値 <b>${fmt(buyNow(S.port, gid))}G</b>　` : '';
+    l2 += `売値 ${can ? '' : '<b>'}${fmt(sp)}G${can ? '' : '</b>'}`;
+    if (tr) l2 += ` <span class="${tr.m > 1 ? 'good' : 'bad'}">${tr.m > 1 ? '📈高騰中' : '📉値崩れ中'}</span>`;
+    let l3 = '';
+    if (own) {
+      const avg = own.cost / own.qty;
+      l3 = `<div class="sub">所持 <b>${own.qty}</b>（仕入れ平均 ${fmt(avg)}G）` +
+        `<span class="${sp >= avg ? 'good' : 'bad'}"> ${sp >= avg ? '▲利益' : '▼損'}</span></div>`;
+    }
+    return `<div class="card row"><div class="grow"><div class="name" data-a="book" data-g="${gid}">${g.icon} ${g.name} <span class="lnk">相場帳</span></div>` +
+      `<div>${l2}</div>${l3}</div><div class="btns">` +
+      (own ? `<button class="b" data-a="sell" data-g="${gid}">売る</button>` : '') +
+      (can ? `<button class="b pri" data-a="buy" data-g="${gid}">買う</button>` : '') + `</div></div>`;
+  }
   function viewTrade() {
     const p = D.PORTS[S.port];
-    let h = `<h2>${p.name}の交易所</h2><p class="sub">${p.desc}</p>`;
+    let h = `<h2>${p.name}の交易所</h2><p class="sub">${regionName(S.port)}　${p.desc}</p>`;
     if (S.gold < 100 && cargoCount() === 0) {
       h += `<div class="card"><p>資金が尽きかけている。商人ギルドが再起の資金を貸してくれるそうだ。</p>` +
         `<button class="b pri wide" data-a="aid">援助を受ける（+${C.aidGold}G）</button></div>`;
     }
+    // 噂：この港の市況と、近い港の市況
+    const here = S.trends.filter((t) => t.p === S.port);
+    const near = S.trends.filter((t) => t.p !== S.port && S.found.includes(t.p))
+      .sort((a, b) => seaDist(S.port, a.p) - seaDist(S.port, b.p)).slice(0, 4);
+    if (here.length || near.length) {
+      h += `<div class="card rumor"><div class="name">📣 市場の噂</div>${here.concat(near).map(trendLine).join('')}</div>`;
+    }
     h += `<div class="card row"><div class="grow"><div class="name">🍞 食料</div>` +
       `<div class="sub">1樽 ${C.foodPrice}G ／ 所持 ${Math.floor(S.food)}樽（1日に ${foodPerDay().toFixed(1)}樽 消費）</div></div>` +
       `<div class="btns"><button class="b" data-a="foodSell">売る</button><button class="b pri" data-a="foodBuy">買う</button></div></div>`;
-    h += `<h3>交易品（空き ${freeSpace()}）</h3>`;
-    for (const gid in D.GOODS) {
-      const g = D.GOODS[gid], sells = p.sells.includes(gid), own = S.cargo[gid];
-      const sp = sellNow(S.port, gid);
-      let l2 = sells ? `買値 <b>${fmt(buyNow(S.port, gid))}G</b>　` : `<span class="sub">ここでは買えない</span>　`;
-      l2 += `売値 ${fmt(sp)}G`;
-      let l3 = '';
-      if (own) {
-        const avg = own.cost / own.qty;
-        l3 = `<div class="sub">所持 <b>${own.qty}</b>（仕入れ平均 ${fmt(avg)}G）` +
-          `<span class="${sp >= avg ? 'good' : 'bad'}"> ${sp >= avg ? '▲利益' : '▼損'}</span></div>`;
-      }
-      h += `<div class="card row"><div class="grow"><div class="name">${g.icon} ${g.name}${sells ? ' <span class="sub good">特産</span>' : ''}</div>` +
-        `<div>${l2}</div>${l3}</div><div class="btns">` +
-        `<button class="b" data-a="sell" data-g="${gid}" ${own ? '' : 'disabled'}>売る</button>` +
-        `<button class="b pri" data-a="buy" data-g="${gid}" ${sells ? '' : 'disabled'}>買う</button></div></div>`;
-    }
+
+    const local = Object.keys(p.sells || {});
+    h += `<h3>この港の特産（空き ${freeSpace()}）</h3>` + (local.length ? local.map(goodCard).join('') : `<p class="sub">特産はない。</p>`);
+    const owned = Object.keys(S.cargo).filter((g) => !local.includes(g));
+    if (owned.length) h += `<h3>積み荷を売る</h3>` + owned.map(goodCard).join('');
+
+    // 全品の相場（高く売れる順）
+    const all = Object.keys(D.GOODS).sort((a, b) => mult(S.port, b) - mult(S.port, a));
+    h += `<details class="card"><summary>この港の相場をすべて見る（${all.length}品）</summary><table class="t">` +
+      `<tr><th>品（タップで相場帳）</th><th>売値</th><th>ふだんとの差</th></tr>` +
+      all.map((gid) => {
+        const m = mult(S.port, gid) * (1 + S.market[S.port][gid]), pct = Math.round((m - 1) * 100);
+        return `<tr data-a="book" data-g="${gid}"><td>${D.GOODS[gid].icon} ${D.GOODS[gid].name}</td><td>${fmt(sellNow(S.port, gid))}G</td>` +
+          `<td class="${pct >= 15 ? 'good' : pct <= -15 ? 'bad' : ''}">${pct >= 0 ? '+' : ''}${pct}%</td></tr>`;
+      }).join('') + `</table></details>`;
     return h;
   }
 
-  function wantsOf(pid) {
-    return Object.keys(D.GOODS).sort((a, b) => mult(pid, b) - mult(pid, a)).slice(0, 3).map((g) => D.GOODS[g].name).join('・');
+  // その港で高く売れる品（上位）
+  function wantsOf(pid, n) {
+    return Object.keys(D.GOODS).filter((g) => !sells(pid, g)).sort((a, b) => baseMult(pid, b) - baseMult(pid, a))
+      .slice(0, n || 4).map((g) => D.GOODS[g].name).join('・');
   }
   function viewSail() {
-    let h = `<h2>行き先を選ぶ</h2><p class="sub">地図の港をタップ。金色が現在地。</p>` +
-      `<div class="mapwrap"><canvas id="map"></canvas></div>`;
+    let h = `<div class="mapwrap"><canvas id="map"></canvas>` +
+      `<div class="mapbtns"><button data-a="zoom" data-d="1">＋</button><button data-a="zoom" data-d="-1">−</button>` +
+      `<button data-a="home">⌖</button><button data-a="world">全</button></div></div>` +
+      `<p class="sub legend">指でずらす・2本指で拡大。港をタップで行き先に。<br>` +
+      `<i class="lg" style="background:#fbf3df"></i>商船 <i class="lg" style="background:#e6c36a"></i>ガレー ` +
+      `<i class="lg" style="background:#cdb892"></i>漁船 <i class="lg" style="background:#1c1c1c;border-color:#ff5a4a"></i>海賊 ` +
+      `<i class="lg" style="background:#c9413a"></i>軍船</p>`;
     if (!ui.dest) {
-      h += `<div class="card">` + Object.keys(D.PORTS).filter((k) => k !== S.port).map((k) => {
+      const near = S.found.filter((k) => k !== S.port).sort((a, b) => seaDist(S.port, a) - seaDist(S.port, b)).slice(0, 8);
+      h += `<h3>近い港（発見済み ${S.found.length}港）</h3><div class="card">` + near.map((k) => {
         const r = route(S.port, k);
         return `<div class="row" style="padding:4px 0"><div class="grow"><span class="name">${D.PORTS[k].name}</span> ` +
-          `<span class="sub">約${estDays(r)}日</span></div><button class="b" data-a="dest" data-id="${k}">選ぶ</button></div>`;
+          `<span class="sub">約${estDays(r)}日　${sellList(k)}</span></div><button class="b" data-a="dest" data-id="${k}">選ぶ</button></div>`;
       }).join('') + `</div>`;
       return h;
     }
     const p = D.PORTS[ui.dest], r = route(S.port, ui.dest), days = estDays(r);
     const need = Math.ceil(days * foodPerDay()), short = S.food < need;
     const kn = S.known[ui.dest];
-    h += `<div class="card"><div class="row"><div class="grow"><h2>${p.name}</h2></div>` +
+    h += `<div class="card"><div class="row"><div class="grow"><h2>${p.name}</h2><span class="sub">${regionName(ui.dest)}</span></div>` +
       `<button class="b" data-a="dest" data-id="">選び直す</button></div>` +
       `<p class="sub">${p.desc}</p>` +
       `<div class="stat"><div><span>距離</span> ${fmt(r.total)}海里</div><div><span>日数の目安</span> 約${days}日</div>` +
       `<div><span>必要な食料</span> <b class="${short ? 'bad' : 'good'}">約${need}樽</b></div><div><span>所持</span> ${Math.floor(S.food)}樽</div>` +
-      `<div><span>特産</span> ${p.sells.map((g) => D.GOODS[g].name).join('・')}</div><div><span>造船所</span> ${p.shipyard ? 'あり' : 'なし'}</div></div>` +
-      `<p class="sub">よく売れる品：${wantsOf(ui.dest)}</p>`;
-    if (kn) {
+      `<div><span>造船所</span> ${p.shipyard ? 'あり' : 'なし'}</div><div><span>市場</span> ${p.size >= 1.3 ? '大きい' : p.size >= 1 ? 'ふつう' : '小さい'}</div></div>` +
+      `<p class="sub">特産：${sellList(ui.dest)}<br>よく売れる品：${wantsOf(ui.dest)}</p>`;
+    const tr = S.trends.filter((t) => t.p === ui.dest);
+    if (tr.length) h += `<div class="rumor">${tr.map(trendLine).join('')}</div>`;
+    const rows = Object.keys(D.GOODS).filter((g) => sells(S.port, g) || S.cargo[g]);
+    if (kn && rows.length) {
       h += `<table class="t"><tr><th>前回の相場（${Math.max(0, S.day - kn.day)}日前）</th><th>ここの買値</th><th>行き先の売値</th></tr>`;
-      for (const gid in D.GOODS) {
-        const here = D.PORTS[S.port].sells.includes(gid) ? buyNow(S.port, gid) : null;
-        const own = S.cargo[gid];
-        if (here === null && !own) continue;
-        const base = here !== null ? here : own.cost / own.qty;
-        const there = kn.prices[gid];
+      for (const gid of rows) {
+        const here = sells(S.port, gid) ? buyNow(S.port, gid) : null, own = S.cargo[gid];
+        const base = here !== null ? here : own.cost / own.qty, there = kn.prices[gid];
         h += `<tr><td>${D.GOODS[gid].name}${own ? `（所持${own.qty}）` : ''}</td><td>${here !== null ? fmt(here) : '—'}</td>` +
-          `<td class="${there > base ? 'good' : 'bad'}">${fmt(there)}</td></tr>`;
+          (there == null ? `<td class="sub">不明</td>` : `<td class="${there > base ? 'good' : 'bad'}">${fmt(there)}</td>`) + `</tr>`;
       }
       h += `</table>`;
-    } else {
-      h += `<p class="sub">まだ訪れたことがなく、相場はわからない。</p>`;
+    } else if (!kn) {
+      h += `<p class="sub">まだ訪れたことがなく、くわしい相場はわからない。</p>`;
     }
     if (short) h += `<p class="bad">⚠ 食料が足りない。尽きると船足が落ち、船員が減る。</p>`;
     h += `<button class="b pri wide" data-a="depart">⛵ ${p.name}へ出航する</button></div>`;
     return h;
-  }
-  function drawSailMap() {
-    const cv = $('#map');
-    if (!cv) return;
-    drawMap(cv, { here: S.port, dest: ui.dest, route: ui.dest ? route(S.port, ui.dest) : null });
-    cv.onclick = (e) => {
-      const rc = cv.getBoundingClientRect(), x = e.clientX - rc.left, y = e.clientY - rc.top;
-      let best = null, bd = 28;
-      for (const pid in D.PORTS) {
-        const q = proj(D.PORTS[pid].pos, rc.width, rc.height), d = Math.hypot(q[0] - x, q[1] - y);
-        if (d < bd) { bd = d; best = pid; }
-      }
-      if (best && best !== S.port) { ui.dest = best; render(); }
-    };
   }
 
   function upCost(k) { return Math.round(D.SHIPS[S.ship.type].price * D.UPGRADES[k].costRate); }
@@ -465,9 +859,13 @@
 
   function viewInfo() {
     const sp = spec(), t = sp.t, sh = S.ship, era = currentEra(), ne = nextEra();
+    const total = Object.keys(D.PORTS).length, visited = Object.keys(S.known).length;
     let h = `<h2>商会の記録</h2>`;
     h += `<div class="card"><div class="name">${era.name}（${dateStr()}）</div><div class="sub">${era.desc}</div>` +
       (ne ? `<div class="sub">次の時代：${ne.year}年「${ne.name}」</div>` : `<div class="sub">この版で用意された時代はここまで。交易はずっと続けられる。</div>`) + `</div>`;
+    h += `<h3>海図</h3><div class="card stat"><div><span>知っている港</span> ${S.found.length}/${total}</div>` +
+      `<div><span>訪れた港</span> ${visited}</div></div>` +
+      (S.found.length < total ? `<p class="sub">まだ海図にない港がある。遠くの港の酒場で噂を集めよう。</p>` : '');
     h += `<h3>船</h3><div class="card"><div class="name">⛵ ${t.name}</div><div class="sub">${t.desc}</div><div class="stat">` +
       `<div><span>速さ</span> ${sp.speed.toFixed(1)}</div><div><span>船倉</span> ${usedSpace()}/${sp.hold}</div>` +
       `<div><span>船員</span> ${sh.crew}人（必要${sp.minCrew}）</div><div><span>大砲</span> ${sh.guns}/${t.maxGuns}門</div>` +
@@ -484,26 +882,54 @@
   }
 
   function helpBody() {
-    return `<p>① <b>交易所</b>で特産品を安く買う。</p><p>② <b>出航</b>で行き先を選ぶ。食料を忘れずに。</p>` +
+    return `<p>① <b>交易所</b>で特産品を安く買う。</p><p>② <b>出航</b>で地図から行き先を選ぶ。食料を忘れずに。</p>` +
       `<p>③ 着いた港で高く売る。差額がもうけ。</p><p>④ <b>ドック</b>で修理・船員・大砲、造船所のある港では改造と船の購入。</p>` +
-      `<p class="sub">まとめて売買すると値段が動く。同じ品ばかり運ぶと、だんだんもうからなくなる。</p>` +
-      `<p class="sub">${D.ERAS[D.ERAS.length - 1].year}年には新しい時代の船が解放される。進行は自動で保存される。</p>`;
+      `<p class="sub">品の名前をタップすると<b>相場帳</b>が開き、訪れた港の値段を見比べられる。地域ごとに安い品・高い品がちがうので、もうかる航路を探そう。</p>` +
+      `<p class="sub">まとめて売買すると値段が動き、戻るには日数がかかる。同じ航路ばかりでは、だんだんもうからなくなる。「市場の噂」の高騰も狙い目。</p>` +
+      `<p class="sub">遠くの港は、手前の港で噂を聞くと海図に現れる。進行は自動で保存される。</p>`;
   }
 
   // ---------- 港での操作 ----------
   const actions = {
-    tab(d) { ui.tab = d.id; window.scrollTo(0, 0); render(); },
-    dest(d) { ui.dest = d.id || null; render(); },
+    tab(d) {
+      ui.tab = d.id; window.scrollTo(0, 0);
+      if (d.id === 'sail') { if (ui.dest) fitRoute(); else centerOn(S.port); }
+      render();
+    },
+    dest(d) { ui.dest = d.id || null; if (ui.dest) fitRoute(); render(); window.scrollTo(0, 0); },
+    zoom(d) { setZoom(cam.z * (+d.d > 0 ? 1.45 : 1 / 1.45)); },
+    home() { centerOn(voyage ? voyage.dest : S.port); setZoom(C.zoomStart); },
+    world() { cam.lon = 8; cam.lat = 20; setZoom(C.zoomMin); },
     help() { modal({ title: '遊び方', body: helpBody(), buttons: [{ label: 'とじる', cls: 'pri' }] }); },
     reset() {
       confirmBox('最初からやり直す', '<p>今の記録は消える。よい？</p>', 'やり直す', () => {
-        newGame(); save(); ui = { tab: 'trade', dest: null }; render(); actions.help();
+        newGame(); save(); ui = { tab: 'trade', dest: null }; centerOn(S.port); render(); actions.help();
       });
     },
     aid() { S.gold += C.aidGold; save(); render(); toast(`ギルドから ${C.aidGold}G を受け取った`); },
 
+    // 相場帳：訪れた港での、その品の値段を見比べる
+    book(d) {
+      const gid = d.g, g = D.GOODS[gid];
+      const rows = Object.keys(S.known).map((pid) => ({ pid, k: S.known[pid] })).filter((r) => r.k.prices[gid] != null)
+        .sort((a, b) => b.k.prices[gid] - a.k.prices[gid]);
+      const buys = rows.filter((r) => r.k.buys[gid] != null).map((r) => r.k.buys[gid]);
+      const lo = buys.length ? Math.min.apply(null, buys) : null, hi = rows.length ? rows[0].k.prices[gid] : null;
+      let body = `<p class="sub">訪れた港で最後に見た値段。買値があるのは産地だけ。</p>`;
+      if (lo !== null && hi !== null && hi > lo) body += `<p>いちばん安い買値 ${G(lo)} → いちばん高い売値 ${G(hi)}　<b class="good">差 +${fmt(hi - lo)}G</b></p>`;
+      body += `<table class="t"><tr><th>港</th><th>買値</th><th>売値</th><th>記録</th></tr>` + rows.map((r) => {
+        const b = r.k.buys[gid], age = S.day - r.k.day;
+        return `<tr><td>${D.PORTS[r.pid].name}${r.pid === S.port ? '（ここ）' : ''}</td>` +
+          `<td class="${b != null && b === lo ? 'good' : ''}">${b != null ? fmt(b) : '—'}</td>` +
+          `<td class="${r.k.prices[gid] === hi ? 'good' : ''}">${fmt(r.k.prices[gid])}</td><td class="sub">${age <= 0 ? '今' : age + '日前'}</td></tr>`;
+      }).join('') + `</table>`;
+      if (!rows.length) body += `<p class="sub">まだ記録がない。</p>`;
+      modal({ title: `${g.icon} ${g.name}の相場帳`, body, buttons: [{ label: 'とじる', cls: 'pri' }] });
+    },
+
     buy(d) {
       const gid = d.g, g = D.GOODS[gid], max = maxBuy(S.port, gid);
+      if (!sells(S.port, gid)) return;
       if (max <= 0) return toast(freeSpace() <= 0 ? '船倉がいっぱい' : 'お金が足りない');
       openQty({
         title: `${g.name}を買う`, max, okLabel: '買う',
@@ -557,7 +983,8 @@
     },
 
     repair() {
-      let cost = repairCost();
+      const cost = repairCost();
+      if (cost <= 0) return;
       if (S.gold <= 0) return toast('お金が足りない');
       if (cost > S.gold) { // 払えるぶんだけ直す
         S.ship.hp += (100 - S.ship.hp) * (S.gold / cost); S.gold = 0;
@@ -619,7 +1046,7 @@
         });
     },
     depart() {
-      if (!ui.dest) return;
+      if (!ui.dest || voyage) return;
       const sp = spec();
       if (S.ship.crew < sp.minCrew) {
         return confirmBox('船員が足りない', `<p>必要 ${sp.minCrew}人に対して ${S.ship.crew}人。船足がかなり落ちる。</p>`, 'それでも出航', startVoyage);
@@ -627,6 +1054,14 @@
       startVoyage();
     }
   };
+  // 現在地と行き先の両方が地図に収まるように視点を合わせる
+  function fitRoute() {
+    const a = D.PORTS[S.port].pos, b = D.PORTS[ui.dest].pos;
+    cam.lon = (a[0] + b[0]) / 2; cam.lat = (a[1] + b[1]) / 2;
+    const w = (mv && mv.w) || 340, h = (mv && mv.h) || 300;
+    const zx = w * 0.7 / (Math.abs(a[0] - b[0]) * KXV + 0.01), zy = h * 0.7 / (Math.abs(a[1] - b[1]) + 0.01);
+    setZoom(Math.min(zx, zy, 16));
+  }
 
   document.addEventListener('click', (e) => {
     const el = e.target.closest('[data-a]');
@@ -646,22 +1081,24 @@
     if (!r) return toast('航路がない');
     recordKnown(S.port); save();
     voyage = {
-      from: S.port, dest: ui.dest, r, done: 0, days: 0, wind: pickWind(), windLeft: rndi(2, 5),
-      calm: 0, pirate: false, starved: false, wages: 0, paused: false, log: [], goldAtStart: S.gold
+      from: S.port, dest: ui.dest, r, done: 0, shown: 0, days: 0, wind: pickWind(), windLeft: rndi(2, 5),
+      calm: 0, pirate: false, starved: false, wages: 0, paused: false, log: []
     };
     $('#tabs').classList.add('hidden');
     $('#main').innerHTML = `<h2>${D.PORTS[voyage.from].name} → ${D.PORTS[voyage.dest].name}</h2>` +
-      `<div class="mapwrap"><canvas id="sea"></canvas></div><div class="card"><div class="seastat" id="seastat"></div></div>` +
-      `<div class="card log" id="vlog"></div>`;
+      `<div class="mapwrap"><canvas id="sea"></canvas>` +
+      `<div class="mapbtns"><button data-a="zoom" data-d="1">＋</button><button data-a="zoom" data-d="-1">−</button></div></div>` +
+      `<div class="card"><div class="seastat" id="seastat"></div></div><div class="card log" id="vlog"></div>`;
     window.scrollTo(0, 0);
+    setZoom(clamp(cam.z, 9, 20));
+    openMap($('#sea'), 'sea', 0.42);
     vlog('錨を上げ、港を出た。');
-    drawSea();
+    seaText();
     voyage.timer = setTimeout(tick, 500);
   }
-  function drawSea() {
-    const v = voyage, cv = $('#sea');
-    if (!v || !cv) return;
-    drawMap(cv, { here: v.from, dest: v.dest, route: v.r, ship: pointAt(v.r, v.done) });
+  function seaText() {
+    const v = voyage;
+    if (!v) return;
     $('#seastat').innerHTML = `<span><b>${v.days}</b>日目</span><span>${v.calm > 0 ? '凪' : WIND_NAME[v.wind]}</span>` +
       `<span>残り ${fmt(v.r.total - v.done)}海里</span>`;
     $('#vlog').innerHTML = v.log.join('');
@@ -670,7 +1107,7 @@
   function resume() {
     if (!voyage) return;
     voyage.paused = false;
-    drawSea();
+    seaText();
     voyage.timer = setTimeout(tick, C.tickMs);
   }
   function tick() {
@@ -694,7 +1131,7 @@
     }
     v.wages += S.ship.crew * C.wagePerDay;
     v.done += dist;
-    if (v.done >= v.r.total) { v.done = v.r.total; drawSea(); return arrive(); }
+    if (v.done >= v.r.total) { v.done = v.r.total; seaText(); return arrive(); }
 
     let pause = C.tickMs;
     const r = Math.random(), e = C.ev;
@@ -705,12 +1142,12 @@
     } else if (r < e.storm + e.calm) {
       if (!t.oars && v.calm <= 0) { v.calm = rndi(2, 3); vlog('🌫 風が止んだ。しばらく進めない。'); pause = 600; }
     } else if (r < e.storm + e.calm + e.pirate) {
-      if (!v.pirate && v.days > 1) { v.pirate = true; v.paused = true; drawSea(); return pirateEvent(); }
+      if (!v.pirate && v.days > 1) { v.pirate = true; v.paused = true; seaText(); return pirateEvent(); }
     } else if (r < e.storm + e.calm + e.pirate + e.flotsam) {
       const g = rndi(30, 120); S.gold += g;
       vlog(`🪵 漂流する積み荷を拾った。+${g}G`, 'good'); pause = 600;
     }
-    drawSea();
+    seaText();
     v.timer = setTimeout(tick, pause);
   }
 
@@ -725,8 +1162,8 @@
   }
   function arrive() {
     const v = voyage, p = D.PORTS[v.dest];
-    const wages = Math.round(v.wages);
-    let body = `<p>${v.days}日の航海を終えた。</p>`;
+    const wages = Math.round(v.wages), first = !S.known[v.dest];
+    let body = `<p>${v.days}日の航海を終えた。${first ? '<b class="good">はじめて訪れる港だ。</b>' : ''}</p>`;
     if (S.gold >= wages) {
       S.gold -= wages; body += `<p>船員の給料 ${G(wages)} を払った。</p>`;
     } else {
@@ -739,7 +1176,9 @@
     voyage = null; ui = { tab: 'trade', dest: null };
     recordKnown(S.port);
     notices.push({ title: `⚓ ${p.name}に入港`, body, label: '上陸する' });
+    hearRumors(S.port, false);
     checkEras();
+    centerOn(S.port);
     save(); render(); window.scrollTo(0, 0);
     showNotices();
   }
@@ -833,12 +1272,12 @@
   }
   function playBattle(cv, win, guns, cb) {
     const { ctx, w: W, h: H } = setupCanvas(cv, 180);
-    const px = W * 0.2, ex = W * 0.8, sy = H * 0.66, DUR = 3.6;
+    const sx = W * 0.2, ex = W * 0.8, sy = H * 0.66, DUR = 3.6;
     const shots = [];
     const np = clamp(guns || 1, 2, 7), ne = win ? 3 : 6;
     for (let i = 0; i < np; i++) shots.push({ me: true, t0: 0.3 + i * (2.0 / np) + rnd(0, 0.1), hit: Math.random() < (win ? 0.7 : 0.25), off: rnd(18, 40) * (Math.random() < 0.5 ? -1 : 1) });
     for (let i = 0; i < ne; i++) shots.push({ me: false, t0: 0.5 + i * (2.0 / ne) + rnd(0, 0.1), hit: Math.random() < (win ? 0.2 : 0.75), off: rnd(18, 40) * (Math.random() < 0.5 ? -1 : 1) });
-    if (win) shots.push({ me: true, t0: 2.4, hit: true, off: 0 }); else shots.push({ me: false, t0: 2.4, hit: true, off: 0 });
+    shots.push({ me: win, t0: 2.4, hit: true, off: 0 });
     let start = null;
     function frame(ts) {
       if (!cv.isConnected) return;
@@ -849,7 +1288,7 @@
       ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
       const end = clamp((t - 2.9) / 0.7, 0, 1); // 負けた側が傾いて沈む
       const bob = Math.sin(t * 3) * 1.5;
-      drawShip(ctx, px, sy + bob, 1, '#7a4a22', '#fbf3df', '#2f6fd0', win ? 0 : -end * 0.35, win ? 0 : end * 14);
+      drawShip(ctx, sx, sy + bob, 1, '#7a4a22', '#fbf3df', '#2f6fd0', win ? 0 : -end * 0.35, win ? 0 : end * 14);
       drawShip(ctx, ex, sy - bob, -1, '#3a3030', '#d8d0c0', '#111', win ? end * 0.35 : 0, win ? end * 14 : 0);
       ctx.fillStyle = '#1d4a68'; ctx.fillRect(0, sy + 4, W, H);
       ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1.5;
@@ -861,7 +1300,7 @@
       for (const s of shots) {
         const u = (t - s.t0) / 0.75;
         if (u < 0) continue;
-        const x0 = s.me ? px + 30 : ex - 30, tx = (s.me ? ex : px) + (s.hit ? 0 : s.off);
+        const x0 = s.me ? sx + 30 : ex - 30, tx = (s.me ? ex : sx) + (s.hit ? 0 : s.off);
         const y0 = sy - 6, ty = s.hit ? sy - 8 : sy + 10;
         if (u < 0.6) { // 砲口の火と煙
           if (u < 0.15) { ctx.fillStyle = '#ffb030'; ctx.beginPath(); ctx.arc(x0, y0, 7, 0, 7); ctx.fill(); }
@@ -888,12 +1327,23 @@
   }
 
   // ---------- 起動 ----------
-  const isNew = !load();
-  if (isNew) { newGame(); save(); }
+  const hadSave = load();
+  if (!hadSave) { newGame(); save(); }
+  else save(); // 版を上げたセーブを書き戻す
+  centerOn(S.port);
   render();
-  if (isNew) modal({ title: '風と帆の商会', body: `<p>${C.startYear}年、リスボン。小さな船1隻と ${fmt(C.startGold)}G を元手に、交易で商会を大きくしよう。</p>` + helpBody(), buttons: [{ label: 'はじめる', cls: 'pri' }] });
-  window.addEventListener('resize', () => { if (voyage) drawSea(); else if (ui.tab === 'sail') drawSailMap(); });
+  if (!hadSave) modal({ title: '風と帆の商会', body: `<p>${C.startYear}年、リスボン。小さな船1隻と ${fmt(C.startGold)}G を元手に、交易で商会を大きくしよう。</p>` + helpBody(), buttons: [{ label: 'はじめる', cls: 'pri' }] });
+  let rsT = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(rsT);
+    rsT = setTimeout(() => {
+      if (voyage) { const cv = $('#sea'); if (cv) openMap(cv, 'sea', 0.42); } else if (ui.tab === 'sail') render();
+    }, 200);
+  });
 
-  // 動作確認用（コンソールから状態をのぞける）
-  window.__game = { get state() { return S; }, route, spec };
+  // 動作確認用（コンソールやテストから中をのぞける）
+  window.__game = {
+    get state() { return S; }, get npcs() { return npcs; }, get cam() { return cam; },
+    route, spec, inLand, clearLine, graph, baseMult, mult, seaDist, sellNow, buyNow, nm
+  };
 })();
