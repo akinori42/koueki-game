@@ -1,0 +1,114 @@
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: #0a1826; color: #f1e7d0;
+  font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  font-size: 15px; line-height: 1.5;
+  touch-action: manipulation;
+}
+#app {
+  max-width: 480px; margin: 0 auto; min-height: 100%;
+  background: #0f2233; display: flex; flex-direction: column;
+}
+
+/* 上部の所持金など */
+#hud {
+  position: sticky; top: 0; z-index: 5;
+  background: #0b1a29; border-bottom: 1px solid #2b4a66;
+  padding: calc(8px + env(safe-area-inset-top)) 12px 8px;
+}
+.hud1 { display: flex; justify-content: space-between; align-items: baseline; font-weight: 700; }
+.hud1 .gold { color: #e0b04a; font-size: 18px; }
+.hud2 { display: flex; justify-content: space-between; gap: 6px; font-size: 12px; color: #b9c7d3; margin-top: 2px; }
+
+#main { flex: 1; padding: 12px 12px calc(84px + env(safe-area-inset-bottom)); }
+
+/* 下部のタブ */
+#tabs {
+  position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
+  width: 100%; max-width: 480px; display: flex; z-index: 5;
+  background: #0b1a29; border-top: 1px solid #2b4a66;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+#tabs button {
+  flex: 1; background: none; border: 0; color: #8fa5b8;
+  padding: 10px 0 9px; font-size: 12px; font-family: inherit;
+}
+#tabs button .ic { display: block; font-size: 20px; line-height: 1.2; }
+#tabs button.on { color: #e0b04a; }
+#tabs.hidden { display: none; }
+
+h2 { font-size: 18px; margin: 0 0 2px; }
+h3 { font-size: 14px; margin: 18px 0 8px; color: #e0b04a; border-bottom: 1px solid #2b4a66; padding-bottom: 4px; }
+p { margin: 4px 0; }
+.sub { font-size: 12px; color: #a9b9c7; }
+.good { color: #7ed492; }
+.bad { color: #f08a7a; }
+.gold { color: #e0b04a; }
+
+.card {
+  background: #17324a; border: 1px solid #2b4a66; border-radius: 10px;
+  padding: 10px 12px; margin-bottom: 8px;
+}
+.row { display: flex; align-items: center; gap: 8px; }
+.row .grow { flex: 1; min-width: 0; }
+.name { font-weight: 700; }
+.btns { display: flex; gap: 6px; flex-shrink: 0; }
+
+button.b {
+  min-height: 44px; min-width: 52px; padding: 0 12px;
+  border-radius: 8px; border: 1px solid #4a6a88; background: #24486a;
+  color: #f1e7d0; font-size: 14px; font-weight: 700; font-family: inherit;
+}
+button.b:active { background: #2f5b84; }
+button.b.pri { background: #b8862b; border-color: #e0b04a; color: #1a1205; }
+button.b.pri:active { background: #d09a35; }
+button.b.warn { background: #6a2c28; border-color: #a04a44; }
+button.b.wide { width: 100%; margin-top: 8px; }
+button.b:disabled { opacity: .35; }
+
+/* 地図 */
+canvas { display: block; width: 100%; border-radius: 10px; }
+.mapwrap { border: 1px solid #2b4a66; border-radius: 10px; overflow: hidden; margin-bottom: 10px; }
+
+table.t { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+table.t th { text-align: right; font-weight: 400; color: #a9b9c7; font-size: 11px; padding: 2px 4px; }
+table.t th:first-child, table.t td:first-child { text-align: left; }
+table.t td { text-align: right; padding: 4px; border-top: 1px solid #25445f; }
+
+.stat { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 13px; }
+.stat span { color: #a9b9c7; }
+
+/* 航海中のログ */
+.log { font-size: 13px; min-height: 110px; }
+.log div { padding: 2px 0; border-bottom: 1px dashed #25445f; }
+.seastat { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px; }
+.seastat b { font-size: 16px; }
+
+/* モーダル */
+#modal {
+  position: fixed; inset: 0; z-index: 20; background: rgba(4, 10, 18, .75);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+#modal.hidden, #toast.hidden { display: none; }
+.mbox {
+  width: 100%; max-width: 420px; max-height: 88vh; overflow-y: auto;
+  background: #17324a; border: 1px solid #e0b04a; border-radius: 12px; padding: 16px;
+}
+.mbox h2 { margin-bottom: 8px; color: #e0b04a; }
+.mbtns { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.mbtns.two { flex-direction: row; }
+.mbtns.two button { flex: 1; }
+
+/* 個数えらび */
+#qInfo { font-size: 15px; margin-bottom: 8px; min-height: 48px; }
+#qInfo b { font-size: 22px; color: #e0b04a; }
+input[type=range] { width: 100%; height: 36px; accent-color: #e0b04a; }
+.qbtns { display: flex; gap: 6px; margin-top: 6px; }
+.qbtns button { flex: 1; min-width: 0; padding: 0; }
+
+#toast {
+  position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 30;
+  background: #000c; color: #fff; padding: 8px 16px; border-radius: 20px; font-size: 13px;
+  max-width: 90%; text-align: center;
+}
