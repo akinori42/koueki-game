@@ -1,0 +1,1161 @@
+// 背負い籠の商会：ゲーム本体。数値やデータは js/data/ のファイルにある。
+(function () {
+  'use strict';
+
+  const D = window.SHOKAI, C = D.CONFIG;
+  const SAVE_KEY = 'shokai-save-v1';      // 航海版とは別の保存場所
+  const SAVE_VERSION = 1;
+  const QN = ['朝', '昼', '夕', '夜'];
+  const KIND = { village: '村', town: '町', capital: '王都', port: '港町' };
+  const DANGER = ['安全', 'やや危険', '危険', 'とても危険'];
+
+  let S = null;
+  let ui = { tab: 'market', dest: null };
+  let travel = null;            // 移動中だけ使う
+  let notices = [];             // 順番に出すお知らせ
+  let dayNotes = [];            // 日付が変わったときのできごと
+
+  // ---------- 小道具 ----------
+  const $ = (s) => document.querySelector(s);
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const rndi = (a, b) => Math.floor(rnd(a, b + 1));
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const fmt = (n) => Math.round(n).toLocaleString('ja-JP');
+  const G = (n) => `<span class="gold">${fmt(n)}枚</span>`;
+  const day = () => Math.floor(S.time / 4);
+  const timeStr = () => `${day() + 1}日目 ${QN[S.time % 4]}`;
+  const cartT = () => D.CARTS[S.cart.type];
+  const other = (r, t) => (r.a === t ? r.b : r.a);
+  function townName(t) { return S.named[t] ? D.TOWNS[t].name : '？？？'; }
+  function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg; t.classList.remove('hidden');
+    clearTimeout(toast.tm);
+    toast.tm = setTimeout(() => t.classList.add('hidden'), 1800);
+  }
+
+  // ---------- セーブ ----------
+  function newGame() {
+    S = {
+      v: SAVE_VERSION, time: 0, gold: C.startGold, town: C.startTown,
+      cart: { type: 'basket', hp: 100 }, guards: 0, cargo: {}, market: {},
+      seen: {}, named: {}, roads: {}, rep: {}, memo: {}, debt: 0, shop: null,
+      trends: [], rumors: [], hot: {}, hotKnown: {}, caravans: {}, rain: false,
+      stageMax: 1, dead: false, stats: { trips: 0, wins: 0, robbed: 0, profit: 0 }
+    };
+    fillMissing();
+    discover(S.town);
+    recordMemo(S.town);
+  }
+  function fillMissing() {
+    for (const t in D.TOWNS) {
+      S.market[t] = S.market[t] || {};
+      for (const g in D.GOODS) if (typeof S.market[t][g] !== 'number') S.market[t][g] = rnd(-0.08, 0.08);
+      if (typeof S.rep[t] !== 'number') S.rep[t] = 0;
+    }
+    for (const g in S.cargo) if (!D.GOODS[g]) delete S.cargo[g];
+    if (!D.CARTS[S.cart.type]) S.cart = { type: 'basket', hp: 100 };
+    if (!D.TOWNS[S.town]) S.town = C.startTown;
+  }
+  function save() {
+    if (!S || S.dead) return;
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); } catch (e) { /* 保存できない環境でも遊べる */ }
+  }
+  function wipeSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* 無視 */ } }
+  function load() {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return false;
+      const o = JSON.parse(raw);
+      if (!o || o.v !== SAVE_VERSION || o.dead) return false;
+      S = o; fillMissing();
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // ---------- 荷 ----------
+  function cargoCount() { let n = 0; for (const g in S.cargo) n += S.cargo[g].qty; return n; }
+  function freeSpace() { return Math.max(0, cartT().cap - cargoCount()); }
+  function cargoWorth() { let v = 0; for (const g in S.cargo) v += S.cargo[g].qty * D.GOODS[g].base; return v; }
+  // 鮮度（1 = 新鮮、0.15 = 腐りかけ）
+  function fresh(g, age) {
+    const sh = D.GOODS[g].shelf;
+    if (!sh || age <= sh * 0.4) return 1;
+    return Math.max(0.15, 1 - (age - sh * 0.4) / (sh * 0.6) * 0.85);
+  }
+  function loseCargo(frac) {
+    let n = 0;
+    for (const g in S.cargo) {
+      const c = S.cargo[g], k = Math.min(c.qty, Math.ceil(c.qty * frac));
+      c.cost -= (c.cost / c.qty) * k; c.qty -= k; n += k;
+      if (c.qty <= 0) delete S.cargo[g];
+    }
+    return n;
+  }
+  function addCargo(g, q, cost) {
+    const c = S.cargo[g] || (S.cargo[g] = { qty: 0, cost: 0, age: 0 });
+    c.age = (c.age * c.qty) / (c.qty + q);   // 新しく買ったぶんで平均の古さが薄まる
+    c.qty += q; c.cost += cost;
+  }
+
+  // ---------- 相場 ----------
+  const sellsHere = (t, g) => D.TOWNS[t].sells.includes(g);
+  const banned = (t, g) => (D.TOWNS[t].ban || []).includes(g);
+  function trendOf(t, g) { for (const x of S.trends) if (x.t === t && x.g === g) return x; return null; }
+  function mult(t, g) {
+    const m = D.TOWNS[t].prices[g], tr = trendOf(t, g);
+    return (typeof m === 'number' ? m : 1) * (tr ? tr.m : 1);
+  }
+  const step = (t, g) => 1 / (D.GOODS[g].depth * D.TOWNS[t].size);
+  const unitBuy = (t, g, dev) => Math.max(1, Math.ceil(D.GOODS[g].base * mult(t, g) * (1 + dev)));
+  const unitSell = (t, g, dev, f) => Math.max(1, Math.floor(D.GOODS[g].base * mult(t, g) * (1 + dev) * C.sellRate * (f == null ? 1 : f)));
+  const buyNow = (t, g) => unitBuy(t, g, S.market[t][g]);
+  const sellNow = (t, g, f) => unitSell(t, g, S.market[t][g], f);
+  function quote(t, g, q, dir, f) {
+    let dev = S.market[t][g], tot = 0;
+    const st = step(t, g);
+    for (let i = 0; i < q; i++) {
+      if (dir > 0) { tot += unitBuy(t, g, dev); dev = Math.min(C.devMax, dev + st); }
+      else { tot += unitSell(t, g, dev, f); dev = Math.max(C.devMin, dev - st); }
+    }
+    return { tot, dev };
+  }
+  function maxBuy(t, g) {
+    const free = freeSpace(), st = step(t, g);
+    let dev = S.market[t][g], cost = 0, n = 0;
+    while (n < free) {
+      const pr = unitBuy(t, g, dev);
+      if (cost + pr > S.gold) break;
+      cost += pr; dev = Math.min(C.devMax, dev + st); n++;
+    }
+    return n;
+  }
+  function recordMemo(t) {
+    const sell = {}, buy = {};
+    for (const g in D.GOODS) { sell[g] = sellNow(t, g); if (sellsHere(t, g)) buy[g] = buyNow(t, g); }
+    S.memo[t] = { day: day(), sell, buy };
+  }
+  function spawnTrend() {
+    if (S.trends.length >= C.trendMax) return null;
+    const t = pick(Object.keys(D.TOWNS)), g = pick(Object.keys(D.GOODS));
+    if (trendOf(t, g) || banned(t, g)) return null;
+    const down = sellsHere(t, g) ? true : Math.random() < 0.25, range = down ? C.trendDown : C.trendUp;
+    const x = { t, g, m: +rnd(range[0], range[1]).toFixed(2), until: day() + rndi(C.trendDays[0], C.trendDays[1]) };
+    S.trends.push(x);
+    return x;
+  }
+
+  // ---------- お金・借金 ----------
+  function dailyCost() {
+    const c = { living: C.living, feed: cartT().feed, guards: S.guards * C.guardWage, shop: 0 };
+    if (S.shop) { const L = C.shop[S.shop.lv]; c.shop = L.rent + L.wage; }
+    c.total = c.living + c.feed + c.guards + c.shop;
+    return c;
+  }
+  // 払えないぶんはツケ（借金）になる
+  function pay(amount) {
+    if (S.gold >= amount) { S.gold -= amount; return 0; }
+    const short = amount - S.gold;
+    S.gold = 0; S.debt += short;
+    return short;
+  }
+  function shopValue() { let v = 0; if (S.shop) for (let l = 1; l <= S.shop.lv; l++) v += C.shop[l].cost; return v; }
+  function repTotal() { let n = 0; for (const t in S.rep) n += S.rep[t]; return n; }
+  // 借金の上限。荷車や店を持つほど信用が増える（差し押さえで減る借金のほうが大きいので、取られれば一息つける）
+  function debtLimit() { return Math.floor(C.debtBase + cartT().price * 0.2 + shopValue() * 0.3 + repTotal() * 0.5); }
+  // 借金が上限を超えたら、店 → 荷車 → 荷の順に差し押さえ。何も残らなければ破産
+  function foreclose() {
+    let guard = 0;
+    while (S.debt > debtLimit() && guard++ < 10) {
+      if (S.shop) {
+        const v = Math.floor(shopValue() * 0.6);
+        dayNotes.push(`<span class="bad">⚖️ 借金が上限を超え、${D.TOWNS[S.shop.town].name}の${C.shop[S.shop.lv].name}を差し押さえられた（${fmt(v)}枚ぶん）。</span>`);
+        S.debt = Math.max(0, S.debt - v - S.shop.till); S.shop = null;
+      } else if (S.cart.type !== 'basket') {
+        const v = Math.floor(cartT().price * 0.5);
+        dayNotes.push(`<span class="bad">⚖️ 借金が上限を超え、${cartT().name}を差し押さえられた（${fmt(v)}枚ぶん）。</span>`);
+        S.debt = Math.max(0, S.debt - v); S.cart = { type: 'basket', hp: 100 };
+        S.guards = Math.min(S.guards, cartT().guards);
+        const over = cargoCount() - cartT().cap;
+        if (over > 0) { loseCargo(over / cargoCount()); dayNotes.push('背負いきれない荷は置いていくしかなかった。'); }
+      } else if (cargoCount() > 0) {
+        const v = Math.floor(cargoWorth() * 0.5);
+        dayNotes.push(`<span class="bad">⚖️ 借金のかたに、荷をすべて取り上げられた（${fmt(v)}枚ぶん）。</span>`);
+        S.debt = Math.max(0, S.debt - v); S.cargo = {};
+      } else {
+        S.dead = true; wipeSave();
+        return;
+      }
+    }
+  }
+
+  // ---------- 時間 ----------
+  function advance(q) {
+    for (let i = 0; i < q && !S.dead; i++) {
+      S.time++;
+      if (S.time % 4 === 0) newDay();
+    }
+  }
+  function newDay() {
+    const d = day();
+    const short = pay(dailyCost().total);
+    if (short > 0 && !S.tabNoted) { S.tabNoted = true; dayNotes.push(`<span class="bad">宿代や給金を払えず、${fmt(short)}枚がツケ（借金）になった。</span>`); }
+    if (short === 0) S.tabNoted = false;
+    if (short > 0 && S.guards > 0) { dayNotes.push(`<span class="bad">給金が払えず、護衛${S.guards}人は去っていった。</span>`); S.guards = 0; }
+    if (S.debt > 0) S.debt = +(S.debt * (1 + C.interest)).toFixed(2);
+
+    // 傷む品
+    const age = (store, where) => {
+      for (const g in store) {
+        const sh = D.GOODS[g].shelf;
+        if (!sh) continue;
+        store[g].age += S.rain ? 1.3 : 1;
+        if (store[g].age > sh) { dayNotes.push(`<span class="bad">🪰 ${where}${D.GOODS[g].name} ${store[g].qty}個が腐り、捨てるしかなかった。</span>`); delete store[g]; }
+      }
+    };
+    age(S.cargo, '');
+    if (S.shop) age(S.shop.stock, '店の');
+
+    // 相場・市況
+    for (const t in S.market) for (const g in S.market[t]) S.market[t][g] = clamp(S.market[t][g] * C.devDecay + rnd(-C.devNoise, C.devNoise), C.devMin, C.devMax);
+    S.trends = S.trends.filter((x) => x.until > d);
+    S.rumors = S.rumors.filter((x) => x.until > d);
+    if (Math.random() < C.trendChance) spawnTrend();
+
+    // 天気・山賊の動き・隊商
+    S.rain = Math.random() < (S.rain ? C.rainStay : C.rainStart);
+    for (const r in S.hot) if (S.hot[r] <= d) { delete S.hot[r]; delete S.hotKnown[r]; }
+    if (Math.random() < C.hotChance) { const r = pick(Object.keys(D.ROADS).filter((k) => D.ROADS[k].danger >= 1)); S.hot[r] = d + rndi(8, 20); }
+    for (const t in S.caravans) S.caravans[t] = S.caravans[t].filter((c) => c.leave >= d);
+
+    // 店の売り上げ
+    if (S.shop) {
+      const L = C.shop[S.shop.lv], t = S.shop.town;
+      if (d % L.every === 0) {
+        let sold = 0;
+        for (const g in S.shop.stock) {
+          if (banned(t, g)) continue;
+          const it = S.shop.stock[g], n = Math.min(it.qty, L.rate);
+          const price = Math.max(1, Math.floor(D.GOODS[g].base * mult(t, g) * (1 + S.market[t][g]) * C.shopPrice * fresh(g, it.age)));
+          S.shop.till += n * price; S.stats.profit += n * price - (it.cost / it.qty) * n;
+          S.market[t][g] = Math.max(C.devMin, S.market[t][g] - n * step(t, g) * 0.5);
+          it.cost -= (it.cost / it.qty) * n; it.qty -= n; sold += n;
+          if (it.qty <= 0) delete S.shop.stock[g];
+        }
+        if (sold) S.rep[t] = Math.min(100, S.rep[t] + 0.3);
+      }
+    }
+    if (S.debt > debtLimit()) foreclose();
+  }
+  // 操作のあとの後始末：破産の確認、お知らせ、保存、描き直し
+  function settle() {
+    if (S.dead) return gameOver();
+    if (dayNotes.length) { notices.push({ title: '📒 日々のできごと', body: dayNotes.map((x) => `<p>${x}</p>`).join('') }); dayNotes = []; }
+    checkStage();
+    save(); render(); showNotices();
+  }
+  function gameOver() {
+    travel = null; notices = []; dayNotes = [];
+    const st = S.stats, d = day() + 1;
+    modal({
+      title: '💀 破産',
+      body: `<p>借金は膨らみ、差し押さえるものも尽きた。商いの道は、ここで終わる。</p>` +
+        `<p class="sub">${d}日目 ／ 行商 ${st.trips}回 ／ 山賊を退けた ${st.wins}回</p><p class="bad">記録は消えた。最初からやり直しになる。</p>`,
+      buttons: [{ label: '最初から始める', cls: 'pri', fn: () => { newGame(); save(); ui = { tab: 'market', dest: null }; render(); intro(); } }]
+    });
+  }
+
+  // ---------- 段階と目標 ----------
+  function stage() { return S.shop ? 3 : S.cart.type !== 'basket' ? 2 : 1; }
+  function goalText() {
+    if (!S.shop) {
+      if (S.cart.type === 'basket') return `手押し車を買う（${D.CARTS.handcart.price}枚。車屋のある町で）`;
+      return `町で評判を${C.shop[1].rep}まで上げ、露店を出す（${C.shop[1].cost}枚）`;
+    }
+    if (S.shop.lv === 1) return `露店を小さな店にする（評判${C.shop[2].rep}・${C.shop[2].cost}枚）`;
+    return 'この版の目標は達成。王都の商人組合と船は、次の版で。';
+  }
+  function checkStage() {
+    const s = stage();
+    if (s > S.stageMax) {
+      S.stageMax = s;
+      notices.push({
+        title: s === 2 ? '🛒 荷車商人になった' : '🏪 店主になった', label: 'よし',
+        body: s === 2 ? '<p>もう背中だけが頼りではない。積める荷が増え、遠くの町が商いの相手になる。</p><p class="sub">護衛を雇えば、山賊にも立ち向かえる。</p>'
+          : '<p>自分の店を持った。荷を預けておけば、留守のあいだも店が売ってくれる。</p><p class="sub">店賃は毎日かかる。品を切らさないように。</p>'
+      });
+    }
+  }
+
+  // ---------- 地図の知識 ----------
+  function discover(t) {
+    const first = S.seen[t] !== 2;
+    S.seen[t] = 2; S.named[t] = true;
+    for (const rid in D.ROADS) {
+      const r = D.ROADS[rid];
+      if (r.a !== t && r.b !== t) continue;
+      S.roads[rid] = true;
+      const o = other(r, t);
+      if (!S.seen[o]) S.seen[o] = 1;
+    }
+    return first;
+  }
+  function roadsFrom(t) { return Object.keys(D.ROADS).filter((rid) => S.roads[rid] && (D.ROADS[rid].a === t || D.ROADS[rid].b === t)); }
+  function routeInfo(rid, caravan) {
+    const r = D.ROADS[rid], cart = cartT();
+    let m = caravan ? 0.9 : cart.speed[r.type];
+    if (S.rain) m *= C.rainSlow[r.type];
+    const hot = !!S.hot[rid] && S.hot[rid] > day();
+    return {
+      r, to: other(r, S.town), days: Math.max(1, Math.round(r.len * m)), toll: r.toll ? r.toll + cart.toll : 0,
+      danger: Math.min(3, r.danger + (hot ? 1 : 0)), shown: Math.min(3, r.danger + (hot && S.hotKnown[rid] ? 1 : 0)),
+      breakP: cart.breakP[r.type] * (S.rain ? 1.6 : 1) * (S.cart.hp < 40 ? 2 : 1)
+    };
+  }
+  function power(caravan) { return C.selfPower + S.guards * C.guardPower + (caravan ? C.caravanPower : 0); }
+
+  // ---------- モーダル ----------
+  function modal(o) {
+    const m = $('#modal'), btns = o.buttons || [];
+    m.innerHTML = `<div class="mbox"><h2>${o.title || ''}</h2><div>${o.body || ''}</div>` +
+      `<div class="mbtns ${o.two ? 'two' : ''}">` +
+      btns.map((b, i) => `<button class="b ${b.cls || ''}" data-mi="${i}">${b.label}</button>`).join('') + `</div></div>`;
+    m.classList.remove('hidden');
+    m.querySelectorAll('[data-mi]').forEach((el) => {
+      el.onclick = () => { const b = btns[+el.dataset.mi]; closeModal(); if (b.fn) b.fn(); };
+    });
+  }
+  function closeModal() { const m = $('#modal'); m.classList.add('hidden'); m.innerHTML = ''; }
+  function confirmBox(title, body, okLabel, fn) {
+    modal({ title, body, two: true, buttons: [{ label: 'やめる' }, { label: okLabel, cls: 'pri', fn }] });
+  }
+  function openQty(o) {
+    let q = o.init != null ? Math.min(o.init, o.max) : o.max;
+    modal({
+      title: o.title, two: true,
+      body: `<div id="qInfo"></div><input type="range" id="qR" min="0" max="${o.max}" value="${q}">` +
+        `<div class="qbtns"><button class="b" data-q="-10">−10</button><button class="b" data-q="-1">−1</button>` +
+        `<button class="b" data-q="1">+1</button><button class="b" data-q="10">+10</button><button class="b" data-q="max">最大</button></div>`,
+      buttons: [{ label: 'やめる' }, { label: o.okLabel, cls: 'pri', fn: () => { if (q > 0) o.ok(q); } }]
+    });
+    const upd = () => { $('#qInfo').innerHTML = `<b>${q}</b> ${o.unit || '個'}<br>${o.calc(q)}`; $('#qR').value = q; };
+    $('#qR').oninput = (e) => { q = +e.target.value; upd(); };
+    document.querySelectorAll('.qbtns button').forEach((b) => {
+      b.onclick = () => { const v = b.dataset.q; q = v === 'max' ? o.max : clamp(q + (+v), 0, o.max); upd(); };
+    });
+    upd();
+  }
+  function showNotices() {
+    const n = notices.shift();
+    if (!n) return;
+    modal({ title: n.title, body: n.body, buttons: [{ label: n.label || 'OK', cls: 'pri', fn: showNotices }] });
+  }
+
+  // ---------- 画面 ----------
+  const TABS = [
+    { id: 'market', ic: '⚖️', name: '市場' },
+    { id: 'map', ic: '🗺️', name: '地図' },
+    { id: 'town', ic: '🏘️', name: '町' },
+    { id: 'book', ic: '📒', name: '帳簿' }
+  ];
+  function render() {
+    renderHud();
+    if (travel) return;
+    $('#tabs').classList.remove('hidden');
+    $('#tabs').innerHTML = TABS.map((t) =>
+      `<button data-a="tab" data-id="${t.id}" class="${ui.tab === t.id ? 'on' : ''}"><span class="ic">${t.ic}</span>${t.name}</button>`).join('');
+    const m = $('#main');
+    if (ui.tab === 'market') m.innerHTML = viewMarket();
+    else if (ui.tab === 'map') { m.innerHTML = viewMap(); drawMap($('#map'), true); }
+    else if (ui.tab === 'town') m.innerHTML = viewTown();
+    else m.innerHTML = viewBook();
+  }
+  function renderHud() {
+    const where = travel ? `${townName(travel.from)} → ${townName(travel.to)}` : D.TOWNS[S.town].name;
+    $('#hud').innerHTML =
+      `<div class="hud1"><span>${where}</span><span class="gold">💰 ${fmt(S.gold)}枚</span></div>` +
+      `<div class="hud2"><span>📅 ${timeStr()}</span><span>${S.rain ? '🌧 雨' : '☀️ 晴れ'}</span>` +
+      `<span>${cartT().icon} ${cargoCount()}/${cartT().cap}</span>` +
+      (S.guards ? `<span>🛡 ${S.guards}</span>` : '') +
+      `<span class="${S.debt > debtLimit() * 0.8 ? 'bad' : ''}">${S.debt > 0 ? '借金 ' + fmt(S.debt) : '借金なし'}</span></div>`;
+  }
+
+  function tags(g) {
+    let h = '';
+    if (D.GOODS[g].shelf) h += `<span class="tag">傷む</span>`;
+    if (D.CONTRABAND.includes(g)) h += `<span class="tag bad">禁制品</span>`;
+    return h;
+  }
+  function goodCard(g) {
+    const G0 = D.GOODS[g], t = S.town, can = sellsHere(t, g), own = S.cargo[g], ban = banned(t, g), tr = trendOf(t, g);
+    const f = own ? fresh(g, own.age) : 1, sp = sellNow(t, g, f);
+    let l2 = can ? `買値 <b>${fmt(buyNow(t, g))}枚</b>　` : '';
+    l2 += ban ? `<span class="bad">この町では売れない</span>` : `売値 ${can ? '' : '<b>'}${fmt(sp)}枚${can ? '' : '</b>'}`;
+    if (tr) l2 += ` <span class="${tr.m > 1 ? 'good' : 'bad'}">${tr.m > 1 ? '📈高騰中' : '📉値崩れ中'}</span>`;
+    let l3 = '';
+    if (own) {
+      const avg = own.cost / own.qty;
+      l3 = `<div class="sub">所持 <b>${own.qty}</b>（仕入れ ${fmt(avg)}枚）` +
+        (G0.shelf ? ` 鮮度 <span class="${f < 0.6 ? 'bad' : ''}">${Math.round(f * 100)}%</span>` : '') +
+        (ban ? '' : `<span class="${sp >= avg ? 'good' : 'bad'}"> ${sp >= avg ? '▲利益' : '▼損'}</span>`) + `</div>`;
+    }
+    return `<div class="card row"><div class="grow"><div class="name">${G0.icon} ${G0.name}${tags(g)}</div><div>${l2}</div>${l3}</div><div class="btns">` +
+      (own && !ban ? `<button class="b" data-a="sell" data-g="${g}">売る</button>` : '') +
+      (can ? `<button class="b pri" data-a="buy" data-g="${g}">買う</button>` : '') + `</div></div>`;
+  }
+  function rumorLine(x) {
+    return `<div class="${x.up ? 'good' : 'bad'}">${x.up ? '📈' : '📉'} ${D.TOWNS[x.t].name}で${D.GOODS[x.g].name}が${x.up ? '高騰' : '値崩れ'}しているらしい</div>`;
+  }
+  function viewMarket() {
+    const T = D.TOWNS[S.town];
+    let h = `<h2>${T.name}の市場</h2><p class="sub">${KIND[T.kind]}　評判 ${Math.floor(S.rep[S.town])}　${T.desc}</p>`;
+    h += `<div class="card goal"><div class="sub">次の目標</div><div class="name">${goalText()}</div></div>`;
+    if (S.rumors.length) h += `<div class="card"><div class="name">👂 耳にした噂</div><div class="sub">酒場の噂は外れることもある。</div>${S.rumors.map(rumorLine).join('')}</div>`;
+    h += `<h3>この町の特産（空き ${freeSpace()}）</h3>` + T.sells.map(goodCard).join('');
+    const owned = Object.keys(S.cargo).filter((g) => !T.sells.includes(g));
+    if (owned.length) h += `<h3>持ってきた荷</h3>` + owned.map(goodCard).join('');
+    const all = Object.keys(D.GOODS).sort((a, b) => mult(S.town, b) - mult(S.town, a));
+    h += `<details class="card"><summary>この町の相場をすべて見る</summary><table class="t"><tr><th>品</th><th>売値</th><th>ふだんとの差</th></tr>` +
+      all.map((g) => {
+        if (banned(S.town, g)) return `<tr><td>${D.GOODS[g].icon} ${D.GOODS[g].name}</td><td class="bad">禁制</td><td></td></tr>`;
+        const pct = Math.round((mult(S.town, g) * (1 + S.market[S.town][g]) - 1) * 100);
+        return `<tr><td>${D.GOODS[g].icon} ${D.GOODS[g].name}</td><td>${fmt(sellNow(S.town, g))}枚</td>` +
+          `<td class="${pct >= 15 ? 'good' : pct <= -15 ? 'bad' : ''}">${pct >= 0 ? '+' : ''}${pct}%</td></tr>`;
+      }).join('') + `</table></details>`;
+    h += `<p class="sub">売り買いは1回ごとに時間がかかる（1日は朝・昼・夕・夜の4刻）。日が変わるたびに宿代などがかかる。</p>`;
+    return h;
+  }
+
+  // 地図。知っている町と道だけを描く
+  function mapXY(p, w, h) { return [6 + p[0] / 100 * (w - 12), 10 + (p[1] - 24) / 104 * (h - 26)]; }
+  function drawMap(cv, bind) {
+    if (!cv) return;
+    const w = cv.clientWidth || 340, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const h = clamp(Math.round(w * 1.05), 260, Math.round((window.innerHeight || 700) * 0.52));
+    cv.style.height = h + 'px'; cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#e6d5ac'; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = 'rgba(120,95,55,.25)'; ctx.lineWidth = 1;
+    for (let i = 1; i < 6; i++) { ctx.beginPath(); ctx.moveTo(0, h * i / 6); ctx.lineTo(w, h * i / 6); ctx.moveTo(w * i / 6, 0); ctx.lineTo(w * i / 6, h); ctx.stroke(); }
+    const here = travel ? travel.from : S.town, dest = travel ? travel.to : ui.dest;
+
+    // 道。同じ町どうしを結ぶ2本目（抜け道）は曲げて描く
+    const bend = (rid) => (D.ROADS[rid].type === 'path' && Object.keys(D.ROADS).some((k) => k !== rid &&
+      ((D.ROADS[k].a === D.ROADS[rid].a && D.ROADS[k].b === D.ROADS[rid].b)))) ? 22 : 0;
+    const roadPts = (rid) => {
+      const r = D.ROADS[rid], a = mapXY(D.TOWNS[r.a].pos, w, h), b = mapXY(D.TOWNS[r.b].pos, w, h), k = bend(rid);
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+      return { a, b, c: [(a[0] + b[0]) / 2 - (b[1] - a[1]) / len * k, (a[1] + b[1]) / 2 + (b[0] - a[0]) / len * k] };
+    };
+    const along = (P, f) => {   // 道の上の、f（0〜1）の位置
+      const u = 1 - f;
+      return [u * u * P.a[0] + 2 * u * f * P.c[0] + f * f * P.b[0], u * u * P.a[1] + 2 * u * f * P.c[1] + f * f * P.b[1]];
+    };
+    for (const rid in D.ROADS) {
+      if (!S.roads[rid]) continue;
+      const r = D.ROADS[rid], P = roadPts(rid), hot = S.hot[rid] > day() && S.hotKnown[rid];
+      ctx.strokeStyle = hot ? '#c0392b' : r.type === 'road' ? '#7a5a34' : '#9a8056';
+      ctx.lineWidth = r.type === 'road' ? 3 : 2;
+      ctx.setLineDash(r.type === 'road' ? [] : r.type === 'trail' ? [7, 4] : [2, 4]);
+      ctx.beginPath(); ctx.moveTo(P.a[0], P.a[1]); ctx.quadraticCurveTo(P.c[0], P.c[1], P.b[0], P.b[1]); ctx.stroke();
+      ctx.setLineDash([]);
+      if (r.toll) {
+        const m = along(P, 0.5);
+        ctx.fillStyle = '#fff7df'; ctx.strokeStyle = '#7a5a34'; ctx.lineWidth = 1.5;
+        ctx.fillRect(m[0] - 7, m[1] - 7, 14, 14); ctx.strokeRect(m[0] - 7, m[1] - 7, 14, 14);
+        ctx.fillStyle = '#5a3d1c'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('関', m[0], m[1] + 0.5);
+      }
+    }
+    // 町
+    ctx.textBaseline = 'middle';
+    for (const t in D.TOWNS) {
+      if (!S.seen[t]) continue;
+      const T = D.TOWNS[t], q = mapXY(T.pos, w, h), visited = S.seen[t] === 2;
+      const rad = T.kind === 'capital' ? 9 : T.kind === 'village' ? 5 : 7;
+      if (t === dest) { ctx.beginPath(); ctx.arc(q[0], q[1], rad + 5, 0, 7); ctx.strokeStyle = '#d2452f'; ctx.lineWidth = 2.5; ctx.stroke(); }
+      if (t === here) { ctx.beginPath(); ctx.arc(q[0], q[1], rad + 5, 0, 7); ctx.strokeStyle = '#c8961e'; ctx.lineWidth = 2.5; ctx.stroke(); }
+      ctx.beginPath(); ctx.arc(q[0], q[1], rad, 0, 7);
+      ctx.fillStyle = !visited ? '#f6ecd0' : T.kind === 'capital' ? '#b8862b' : T.kind === 'port' ? '#3d7ea6' : '#6b4a2a';
+      ctx.fill(); ctx.strokeStyle = '#3a2814'; ctx.lineWidth = 1.5; ctx.stroke();
+      if (!visited) { ctx.fillStyle = '#5a3d1c'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('？', q[0], q[1] + 0.5); }
+      if (S.shop && S.shop.town === t) { ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('🏪', q[0], q[1] - rad - 8); }
+      const right = q[0] < w * 0.62;
+      ctx.font = 'bold 11px sans-serif'; ctx.textAlign = right ? 'left' : 'right';
+      const tx = q[0] + (right ? rad + 5 : -rad - 5), ty = q[1] + (T.kind === 'capital' ? -14 : 0), nm = townName(t);
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(246,236,208,.9)'; ctx.strokeText(nm, tx, ty);
+      ctx.fillStyle = '#3a2814'; ctx.fillText(nm, tx, ty);
+    }
+    if (travel) {
+      const P = roadPts(travel.rid), rev = D.ROADS[travel.rid].a !== travel.from;
+      const m = along(P, rev ? 1 - travel.frac : travel.frac);
+      ctx.font = '20px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(travel.caravan ? '🐫' : cartT().icon, m[0], m[1] - 4);
+    }
+    if (bind) {
+      cv.onclick = (e) => {
+        const rc = cv.getBoundingClientRect(), x = e.clientX - rc.left, y = e.clientY - rc.top;
+        let best = null, bd = 32;
+        for (const t in D.TOWNS) {
+          if (!S.seen[t] || t === S.town) continue;
+          const q = mapXY(D.TOWNS[t].pos, rc.width, rc.height), d = Math.hypot(q[0] - x, q[1] - y);
+          if (d < bd) { bd = d; best = t; }
+        }
+        if (!best) return;
+        if (roadsFrom(S.town).some((rid) => other(D.ROADS[rid], S.town) === best)) { ui.dest = best; render(); }
+        else toast('ここからの道を知らない');
+      };
+    }
+  }
+  function routeBlock(rid) {
+    const i = routeInfo(rid), r = i.r;
+    let warn = '';
+    if (i.breakP >= 0.1) warn += `<div class="bad sub">⚠ この荷車には悪い道。壊れやすい。</div>`;
+    return `<div class="card"><div class="row"><div class="grow"><div class="name">${D.ROAD_TYPES[r.type].name}` +
+      (r.toll ? `<span class="tag">関所</span>` : '') + `</div>` +
+      `<div class="sub">${i.days}日${S.rain ? '（雨で遅い）' : ''} ／ ${i.toll ? '通行税 ' + i.toll + '枚' : '税なし'} ／ ` +
+      `<span class="${i.shown >= 2 ? 'bad' : ''}">${DANGER[i.shown]}</span></div>${warn}</div>` +
+      `<button class="b pri" data-a="go" data-r="${rid}">出発</button></div></div>`;
+  }
+  function viewMap() {
+    let h = `<div class="mapwrap"><canvas id="map"></canvas></div>` +
+      `<p class="sub">金の輪が現在地。隣の町をタップで行き先に。実線＝街道、破線＝山道、点線＝抜け道、「関」＝関所。</p>`;
+    const rids = roadsFrom(S.town);
+    if (!ui.dest) {
+      const dests = [...new Set(rids.map((rid) => other(D.ROADS[rid], S.town)))];
+      h += `<h3>ここから行ける町</h3><div class="card">` + dests.map((t) => {
+        const days = Math.min.apply(null, rids.filter((rid) => other(D.ROADS[rid], S.town) === t).map((rid) => routeInfo(rid).days));
+        return `<div class="row" style="padding:4px 0"><div class="grow"><span class="name">${townName(t)}</span> ` +
+          `<span class="sub">${days}日〜　${S.seen[t] === 2 ? D.TOWNS[t].sells.map((g) => D.GOODS[g].name).join('・') : 'まだ行ったことがない'}</span></div>` +
+          `<button class="b" data-a="dest" data-id="${t}">選ぶ</button></div>`;
+      }).join('') + `</div>`;
+      return h;
+    }
+    const t = ui.dest, T = D.TOWNS[t], visited = S.seen[t] === 2, mm = S.memo[t];
+    h += `<div class="row"><div class="grow"><h2>${townName(t)}</h2></div><button class="b" data-a="dest" data-id="">選び直す</button></div>`;
+    if (visited) {
+      h += `<p class="sub">${KIND[T.kind]}　評判 ${Math.floor(S.rep[t])}　特産：${T.sells.map((g) => D.GOODS[g].name).join('・')}` +
+        (T.gateTax ? `<br>門で、荷の値打ちの${Math.round(T.gateTax * 100)}%を税として取られる。` : '') + `</p>`;
+      const rows = Object.keys(D.GOODS).filter((g) => sellsHere(S.town, g) || S.cargo[g]);
+      if (mm && rows.length) {
+        h += `<table class="t"><tr><th>前に見た相場（${Math.max(0, day() - mm.day)}日前）</th><th>ここの買値</th><th>行き先の売値</th></tr>` + rows.map((g) => {
+          const hb = sellsHere(S.town, g) ? buyNow(S.town, g) : null, own = S.cargo[g], base = hb !== null ? hb : own.cost / own.qty;
+          return `<tr><td>${D.GOODS[g].name}${own ? `（${own.qty}）` : ''}</td><td>${hb !== null ? fmt(hb) : '—'}</td>` +
+            (banned(t, g) ? `<td class="bad">禁制</td>` : `<td class="${mm.sell[g] > base ? 'good' : 'bad'}">${fmt(mm.sell[g])}</td>`) + `</tr>`;
+        }).join('') + `</table>`;
+      }
+    } else {
+      h += `<p class="sub">${S.named[t] ? T.desc : 'まだ行ったことがない。どんな町かもわからない。'}</p>`;
+    }
+    if (Object.keys(S.cargo).some((g) => D.GOODS[g].shelf)) h += `<p class="sub">🪰 傷む品を積んでいる。日数がかかるほど値が落ちる。</p>`;
+    if (Object.keys(S.cargo).some((g) => D.CONTRABAND.includes(g))) h += `<p class="bad sub">⚠ 禁制品を積んでいる。関所で見つかれば没収と罰金。</p>`;
+    h += `<h3>道を選ぶ</h3>` + rids.filter((rid) => other(D.ROADS[rid], S.town) === t).map(routeBlock).join('');
+    return h;
+  }
+
+  function ensureCaravans(t) {
+    const d = day();
+    let list = (S.caravans[t] || []).filter((c) => c.leave >= d);
+    const roads = Object.keys(D.ROADS).filter((rid) => D.ROADS[rid].type === 'road' && (D.ROADS[rid].a === t || D.ROADS[rid].b === t));
+    let guard = 0;
+    while (list.length < Math.min(2, roads.length) && guard++ < 20) {
+      const rid = pick(roads);
+      if (list.some((c) => c.rid === rid)) continue;
+      list.push({ rid, leave: d + rndi(1, 3), fee: 5 + D.ROADS[rid].len * 4 });
+    }
+    S.caravans[t] = list;
+    return list;
+  }
+  function viewTown() {
+    const t = S.town, T = D.TOWNS[t], cart = cartT(), cost = dailyCost();
+    let h = `<h2>${T.name}</h2><p class="sub">${T.desc}</p>`;
+    h += `<h3>宿</h3><div class="card"><div class="sub">1日の出費 ${cost.total}枚（宿と食事${cost.living}` +
+      (cost.feed ? `・餌${cost.feed}` : '') + (cost.guards ? `・護衛${cost.guards}` : '') + (cost.shop ? `・店${cost.shop}` : '') + `）</div>` +
+      `<div class="qbtns"><button class="b" data-a="rest">1日休む</button><button class="b" data-a="work">日雇いで働く（+${C.laborPay}枚）</button></div></div>`;
+    h += `<h3>酒場</h3><div class="card row"><div class="grow">噂を聞く<div class="sub">知らない町や、相場、山賊の話。外れることもある。</div></div>` +
+      `<button class="b pri" data-a="rumor">${C.rumorCost}枚</button></div>`;
+
+    if (T.has.guard || S.guards > 0) {   // 雇えるのは口入れ屋のある町だけ。暇を出すのはどこでもできる
+      h += `<h3>${T.has.guard ? '口入れ屋（護衛）' : '護衛'}</h3><div class="card"><div>護衛 <b>${S.guards}人</b>　<span class="sub">${cart.name}は${cart.guards}人まで</span></div>` +
+        `<div class="sub">手付け ${C.guardHire}枚、日給 ${C.guardWage}枚。山賊と戦う力になり、襲われにくくなる。` +
+        `${T.has.guard ? '' : 'この町では新しく雇えない。'}</div>` +
+        `<div class="qbtns"><button class="b" data-a="guard" data-n="-1">−1 暇を出す</button>` +
+        (T.has.guard ? `<button class="b pri" data-a="guard" data-n="1">+1 雇う</button>` : '') + `</div></div>`;
+    }
+    if (T.has.caravan) {
+      h += `<h3>隊商</h3><p class="sub">参加費を払って同行する。出発までは待つことになるが、山賊に襲われにくく、襲われても隊商の護衛が戦う。</p>` +
+        ensureCaravans(t).map((c, i) => {
+          const to = other(D.ROADS[c.rid], t), wait = c.leave - day();
+          return `<div class="card row"><div class="grow"><div class="name">🐫 ${townName(to)}行き</div>` +
+            `<div class="sub">${wait <= 0 ? '今日' : wait + '日後に'}出発 ／ 道中 ${routeInfo(c.rid, true).days}日 ／ 参加費 ${c.fee}枚` +
+            (D.ROADS[c.rid].toll ? ' ／ 関所あり' : '') + `</div></div><button class="b pri" data-a="caravan" data-i="${i}">加わる</button></div>`;
+        }).join('');
+    }
+    if (T.has.cart) {
+      h += `<h3>車屋</h3>`;
+      if (S.cart.type !== 'basket') {
+        const rc = Math.ceil((100 - S.cart.hp) / 100 * cart.price * 0.3);
+        h += `<div class="card row"><div class="grow">${cart.name}の具合 <b class="${S.cart.hp < 40 ? 'bad' : ''}">${Math.round(S.cart.hp)}%</b>` +
+          `<div class="sub">40%を切ると道中で壊れやすい</div></div>` +
+          (S.cart.hp < 100 ? `<button class="b pri" data-a="fix">直す ${rc}枚</button>` : `<span class="sub">万全</span>`) + `</div>`;
+      }
+      const tin = tradeIn();
+      for (const id in D.CARTS) {
+        const c = D.CARTS[id];
+        if (id === S.cart.type || id === 'basket') continue;
+        const pr = c.price - tin;
+        h += `<div class="card"><div class="row"><div class="grow"><div class="name">${c.icon} ${c.name}</div><div class="sub">${c.desc}</div></div>` +
+          `<button class="b pri" data-a="buyCart" data-id="${id}">${pr >= 0 ? fmt(pr) + '枚' : '+' + fmt(-pr) + '枚'}</button></div>` +
+          `<div class="stat"><div><span>積める量</span> ${c.cap}</div><div><span>餌代</span> 1日${c.feed}枚</div>` +
+          `<div><span>街道</span> ${c.speed.road <= 0.7 ? '速い' : c.speed.road <= 0.95 ? 'やや速い' : '普通'}</div>` +
+          `<div><span>山道</span> ${c.speed.trail >= 1.4 ? '苦手' : c.speed.trail >= 1.1 ? 'やや遅い' : '普通'}</div>` +
+          `<div><span>護衛</span> ${c.guards}人まで</div><div><span>関所の上乗せ</span> ${c.toll}枚</div></div></div>`;
+      }
+      if (tin) h += `<div class="card row"><div class="grow">今の${cart.name}を売る<div class="sub">背負い籠に戻る。苦しいときの最後の手。</div></div>` +
+        `<button class="b" data-a="sellCart">+${tin}枚</button></div>`;
+    }
+    if (T.has.lender) {
+      const lim = debtLimit(), can = Math.max(0, Math.floor(lim * C.borrowRate - S.debt));
+      h += `<h3>金貸し</h3><div class="card"><div>借金 <b class="${S.debt > 0 ? 'bad' : ''}">${fmt(S.debt)}枚</b>　<span class="sub">上限 ${lim}枚</span></div>` +
+        `<div class="sub">利子は1日${(C.interest * 100).toFixed(1)}%。上限を超えると、店・荷車・荷の順に差し押さえ。何も残らなければ破産。</div>` +
+        `<div class="qbtns"><button class="b" data-a="repay" ${S.debt > 0 && S.gold > 0 ? '' : 'disabled'}>返す</button>` +
+        `<button class="b pri" data-a="borrow" ${can > 0 ? '' : 'disabled'}>借りる（あと${can}枚）</button></div></div>`;
+    }
+    if (T.has.map) {
+      h += `<h3>地図屋</h3><div class="card row"><div class="grow">このあたりの地図<div class="sub">近くの町と道がわかる</div></div><button class="b pri" data-a="mapBuy" data-k="local">${C.mapLocal}枚</button></div>` +
+        `<div class="card row"><div class="grow">国じゅうの地図<div class="sub">すべての町と道がわかる</div></div><button class="b pri" data-a="mapBuy" data-k="full">${C.mapFull}枚</button></div>`;
+    }
+    h += viewShop();
+    return h;
+  }
+  function tradeIn() { return S.cart.type === 'basket' ? 0 : Math.floor(cartT().price * 0.5 * (0.5 + S.cart.hp / 200)); }
+  // 店をたたんだときに戻るお金：建てた費用の3割 ＋ 在庫の半値 ＋ 売上金
+  function closeValue() {
+    if (!S.shop) return 0;
+    let v = shopValue() * 0.3 + S.shop.till;
+    for (const g in S.shop.stock) v += S.shop.stock[g].qty * D.GOODS[g].base * 0.5;
+    return Math.floor(v);
+  }
+  function viewShop() {
+    const t = S.town, T = D.TOWNS[t];
+    let h = `<h3>自分の店</h3>`;
+    if (!S.shop) {
+      const L = C.shop[1];
+      if (T.kind === 'village') return h + `<div class="card sub">村には店を出せない。町・王都・港町で。</div>`;
+      return h + `<div class="card"><div class="name">🏪 露店を出す</div><div class="sub">預けた荷を、${L.every}日に1度の市の日に売ってくれる。自分で卸すより高く売れる。` +
+        `品は${L.kinds}種・${L.units}個まで。場所代 1日${L.rent}枚。</div>` +
+        `<div class="sub">条件：この町の評判 ${L.rep}（今 ${Math.floor(S.rep[t])}）</div>` +
+        `<button class="b pri wide" data-a="shopOpen">露店を出す（${L.cost}枚）</button></div>`;
+    }
+    const sh = S.shop, L = C.shop[sh.lv], st = Object.keys(sh.stock);
+    let units = 0; for (const g of st) units += sh.stock[g].qty;
+    h += `<div class="card"><div class="name">🏪 ${D.TOWNS[sh.town].name}の${L.name}</div>` +
+      `<div class="stat"><div><span>売上金</span> ${fmt(sh.till)}枚</div><div><span>在庫</span> ${units}/${L.units}個</div>` +
+      `<div><span>店賃など</span> 1日${L.rent + L.wage}枚</div><div><span>売れ方</span> ${L.every === 1 ? '毎日' : L.every + '日に1度'}・1品${L.rate}個</div></div>` +
+      (st.length ? `<div class="sub">在庫：${st.map((g) => `${D.GOODS[g].name}×${sh.stock[g].qty}`).join('、')}</div>` : `<div class="sub bad">在庫がない。荷を預けよう。</div>`);
+    if (sh.town !== t) return h + `<div class="sub">店のある町に行けば、荷を預けたり売上金を受け取ったりできる。</div></div>`;
+    h += `<button class="b pri wide" data-a="shopTake" ${sh.till > 0 ? '' : 'disabled'}>売上金を受け取る</button></div>`;
+    const mine = Object.keys(S.cargo).filter((g) => !banned(t, g));
+    if (mine.length) {
+      h += `<div class="card"><div class="name">荷を店に預ける</div>` + mine.map((g) =>
+        `<div class="row" style="padding:4px 0"><div class="grow">${D.GOODS[g].icon} ${D.GOODS[g].name} × ${S.cargo[g].qty}</div>` +
+        `<button class="b" data-a="shopPut" data-g="${g}">預ける</button></div>`).join('') + `</div>`;
+    }
+    h += `<div class="card row"><div class="grow">店をたたむ<div class="sub">在庫は半値で処分。店賃がかからなくなる。</div></div>` +
+      `<button class="b warn" data-a="shopClose">+${closeValue()}枚</button></div>`;
+    if (sh.lv === 1) {
+      const N = C.shop[2];
+      h += `<div class="card"><div class="name">小さな店に建て替える</div><div class="sub">毎日売れるようになり、品は${N.kinds}種・${N.units}個まで置ける。` +
+        `店賃と店番で1日${N.rent + N.wage}枚。</div><div class="sub">条件：この町の評判 ${N.rep}（今 ${Math.floor(S.rep[t])}）</div>` +
+        `<button class="b pri wide" data-a="shopUp">建て替える（${N.cost}枚）</button></div>`;
+    }
+    return h;
+  }
+
+  function viewBook() {
+    const cart = cartT(), cost = dailyCost(), names = ['', '行商人', '荷車商人', '店主'];
+    let h = `<h2>帳簿</h2>`;
+    h += `<div class="card goal"><div class="sub">いまの身分：${names[stage()]}　次の目標</div><div class="name">${goalText()}</div></div>`;
+    h += `<h3>お金</h3><div class="card stat"><div><span>手持ち</span> ${fmt(S.gold)}枚</div><div><span>借金</span> ${fmt(S.debt)}枚</div>` +
+      `<div><span>借金の上限</span> ${debtLimit()}枚</div><div><span>1日の出費</span> ${cost.total}枚</div></div>`;
+    h += `<h3>荷車と護衛</h3><div class="card"><div class="name">${cart.icon} ${cart.name}</div><div class="sub">${cart.desc}</div>` +
+      `<div class="stat"><div><span>荷</span> ${cargoCount()}/${cart.cap}</div><div><span>具合</span> ${Math.round(S.cart.hp)}%</div>` +
+      `<div><span>護衛</span> ${S.guards}/${cart.guards}人</div><div><span>戦う力</span> ${power(false)}</div></div></div>`;
+    const cg = Object.keys(S.cargo);
+    h += `<h3>荷</h3><div class="card">` + (cg.length ? cg.map((g) => `<div>${D.GOODS[g].icon} ${D.GOODS[g].name} × ${S.cargo[g].qty}` +
+      (D.GOODS[g].shelf ? ` <span class="sub">鮮度${Math.round(fresh(g, S.cargo[g].age) * 100)}%</span>` : '') + `</div>`).join('') : `<span class="sub">空っぽ</span>`) + `</div>`;
+    const vis = Object.keys(D.TOWNS).filter((t) => S.seen[t] === 2);
+    h += `<h3>町の評判（訪れた町 ${vis.length}/${Object.keys(D.TOWNS).length}）</h3><div class="card stat">` +
+      vis.map((t) => `<div><span>${D.TOWNS[t].name}</span> ${Math.floor(S.rep[t])}</div>`).join('') + `</div>` +
+      `<p class="sub">評判は、その町が欲しがる品を売ると上がる。店を出すのに必要。</p>`;
+    h += `<h3>これまで</h3><div class="card stat"><div><span>行商</span> ${S.stats.trips}回</div><div><span>山賊を退けた</span> ${S.stats.wins}回</div>` +
+      `<div><span>奪われた</span> ${S.stats.robbed}回</div><div><span>商いの利益</span> ${fmt(S.stats.profit)}枚</div></div>`;
+    h += `<button class="b wide" data-a="help">遊び方を見る</button><button class="b warn wide" data-a="reset">記録を捨てて最初から</button>`;
+    return h;
+  }
+  function helpBody() {
+    return `<p>① <b>市場</b>で特産を安く買う。</p><p>② <b>地図</b>で隣の町を選び、道を決めて出発する。</p>` +
+      `<p>③ 着いた町で高く売る。差額がもうけ。</p><p>④ <b>町</b>で宿・酒場・車屋・金貸し・隊商・店を使う。</p>` +
+      `<p class="sub">毎日、宿代や餌代がかかる。払えないぶんは借金になり、利子がつく。借金が上限を超えると差し押さえ、何も残らなければ<b>破産で最初から</b>。</p>` +
+      `<p class="sub">地図は最初ほとんど白紙。歩いた先の町と、酒場の噂、地図屋で広がる。</p>` +
+      `<p class="sub">魚と果物は日がたつと傷む。火酒は関所と王都で禁制品。街道の関所を避ける抜け道は、山賊が多い。</p>`;
+  }
+  function intro() {
+    modal({
+      title: '背負い籠の商会',
+      body: `<p>ハシバミ村の若者が、背負い籠ひとつと ${C.startGold}枚を元手に商いを始める。</p>` + helpBody(),
+      buttons: [{ label: 'はじめる', cls: 'pri' }]
+    });
+  }
+
+  // ---------- 町での操作 ----------
+  const actions = {
+    tab(d) { ui.tab = d.id; window.scrollTo(0, 0); render(); },
+    dest(d) { ui.dest = d.id || null; render(); },
+    help() { modal({ title: '遊び方', body: helpBody(), buttons: [{ label: 'とじる', cls: 'pri' }] }); },
+    reset() {
+      confirmBox('記録を捨てる', '<p>今の記録は消える。よい？</p>', '最初から', () => {
+        wipeSave(); newGame(); save(); ui = { tab: 'market', dest: null }; render(); intro();
+      });
+    },
+
+    buy(d) {
+      const g = d.g, t = S.town;
+      if (!sellsHere(t, g)) return;
+      const max = maxBuy(t, g);
+      if (max <= 0) return toast(freeSpace() <= 0 ? 'もう積めない' : 'お金が足りない');
+      openQty({
+        title: `${D.GOODS[g].name}を買う`, max, okLabel: '買う',
+        calc: (q) => { const r = quote(t, g, q, 1); return `合計 ${G(r.tot)}　<span class="sub">平均 ${q ? fmt(r.tot / q) : 0}枚</span>`; },
+        ok: (q) => {
+          const r = quote(t, g, q, 1);
+          S.gold -= r.tot; S.market[t][g] = r.dev; addCargo(g, q, r.tot);
+          advance(C.tradeTime); settle();
+        }
+      });
+    },
+    sell(d) {
+      const g = d.g, t = S.town, own = S.cargo[g];
+      if (!own || banned(t, g)) return;
+      const avg = own.cost / own.qty, f = fresh(g, own.age);
+      openQty({
+        title: `${D.GOODS[g].name}を売る`, max: own.qty, okLabel: '売る',
+        calc: (q) => {
+          const r = quote(t, g, q, -1, f), pf = r.tot - avg * q;
+          return `合計 ${G(r.tot)}　<span class="${pf >= 0 ? 'good' : 'bad'}">${pf >= 0 ? '利益 +' : '損 '}${fmt(pf)}枚</span>`;
+        },
+        ok: (q) => {
+          const r = quote(t, g, q, -1, f), wanted = mult(t, g) >= 1.15;
+          S.gold += r.tot; S.market[t][g] = r.dev; S.stats.profit += r.tot - avg * q;
+          S.rep[t] = Math.min(100, S.rep[t] + Math.min(3, r.tot / (wanted ? 50 : 150)));
+          own.cost -= avg * q; own.qty -= q;
+          if (own.qty <= 0) delete S.cargo[g];
+          advance(C.tradeTime); settle();
+        }
+      });
+    },
+
+    rest() { advance(4 - (S.time % 4)); settle(); toast('朝になった'); },
+    work() {
+      advance(4 - (S.time % 4)); if (!S.dead) S.gold += C.laborPay;
+      settle(); toast(`1日働いて ${C.laborPay}枚 稼いだ`);
+    },
+    rumor() {
+      if (S.gold < C.rumorCost) return toast('お金が足りない');
+      S.gold -= C.rumorCost;
+      const d = day();
+      let body;
+      // 知らない町の話
+      const hint = Object.keys(D.TOWNS).filter((t) => !S.named[t] && Object.keys(D.ROADS).some((rid) => {
+        const r = D.ROADS[rid]; return (r.a === t && S.seen[r.b]) || (r.b === t && S.seen[r.a]);
+      }));
+      const hotNew = Object.keys(S.hot).filter((r) => S.hot[r] > d && !S.hotKnown[r] && S.roads[r]);
+      const roll = Math.random();
+      if (hint.length && roll < 0.45) {
+        const t = pick(hint), T = D.TOWNS[t];
+        S.named[t] = true; if (!S.seen[t]) S.seen[t] = 1;
+        for (const rid in D.ROADS) { const r = D.ROADS[rid]; if ((r.a === t && S.seen[r.b]) || (r.b === t && S.seen[r.a])) S.roads[rid] = true; }
+        body = `<p>「<b>${T.name}</b>を知ってるかい。${T.desc}」</p><p class="sub">特産：${T.sells.map((g) => D.GOODS[g].name).join('・')}　地図に書きこんだ。</p>`;
+      } else if (hotNew.length && roll < 0.7) {
+        const rid = pick(hotNew), r = D.ROADS[rid];
+        S.hotKnown[rid] = true;
+        body = `<p>「${townName(r.a)}と${townName(r.b)}のあいだの${D.ROAD_TYPES[r.type].name}に、近ごろ山賊が居ついたそうだ。」</p><p class="sub">地図に赤く印をつけた。</p>`;
+      } else {
+        let x;
+        if (Math.random() < C.rumorFalse) { // 外れの噂
+          const t = pick(Object.keys(D.TOWNS).filter((k) => S.named[k])), g = pick(Object.keys(D.GOODS));
+          x = { t, g, up: Math.random() < 0.7, until: d + rndi(8, 16) };
+        } else {
+          const real = S.trends.filter((k) => S.named[k.t] && !S.rumors.some((q) => q.t === k.t && q.g === k.g));
+          const k = real.length ? pick(real) : spawnTrend();
+          if (k && S.named[k.t]) x = { t: k.t, g: k.g, up: k.m > 1, until: k.until };
+        }
+        if (x) { S.rumors.push(x); body = `<p>「聞いたかい。」</p>${rumorLine(x)}<p class="sub">本当かどうかは、行ってみないとわからない。</p>`; }
+        else body = `<p>酔っぱらいの自慢話ばかりで、役に立つ話はなかった。</p>`;
+      }
+      advance(1);
+      notices.push({ title: '🍺 酒場の噂', body });
+      settle();
+    },
+    guard(d) {
+      if (+d.n > 0) {
+        if (!D.TOWNS[S.town].has.guard) return toast('この町に口入れ屋はない');
+        if (S.guards >= cartT().guards) return toast(`${cartT().name}では${cartT().guards}人まで`);
+        if (S.gold < C.guardHire) return toast('お金が足りない');
+        S.gold -= C.guardHire; S.guards++;
+      } else {
+        if (S.guards <= 0) return toast('護衛がいない');
+        S.guards--;
+      }
+      save(); render();
+    },
+    caravan(d) {
+      const c = ensureCaravans(S.town)[+d.i];
+      if (!c) return;
+      if (S.gold < c.fee) return toast('お金が足りない');
+      const to = other(D.ROADS[c.rid], S.town), wait = Math.max(0, c.leave - day());
+      confirmBox(`🐫 ${townName(to)}行きの隊商`, `<p>参加費 ${G(c.fee)}。${wait > 0 ? wait + '日待ってから' : 'すぐに'}出発する。</p>` +
+        `<p class="sub">待つあいだも宿代はかかる。関所の通行税は自分で払う。</p>`, '加わる', () => {
+          S.gold -= c.fee;
+          S.caravans[S.town] = S.caravans[S.town].filter((x) => x !== c);
+          if (wait > 0) advance(wait * 4 - (S.time % 4));
+          if (S.dead) return gameOver();
+          startTravel(c.rid, true);
+        });
+    },
+    fix() {
+      const cost = Math.ceil((100 - S.cart.hp) / 100 * cartT().price * 0.3);
+      if (S.gold < cost) return toast('お金が足りない');
+      S.gold -= cost; S.cart.hp = 100; save(); render();
+    },
+    buyCart(d) {
+      const c = D.CARTS[d.id], cost = c.price - tradeIn();
+      if (S.gold < cost) return toast('お金が足りない');
+      if (cargoCount() > c.cap) return toast('今の荷が積みきれない');
+      confirmBox(`${c.name}を買う`, `<p>${c.desc}</p><p>支払い ${G(Math.max(0, cost))}${c.feed ? `　餌代 1日${c.feed}枚` : ''}</p>`, '買う', () => {
+        S.gold -= cost; S.cart = { type: d.id, hp: 100 }; S.guards = Math.min(S.guards, c.guards);
+        settle(); toast(`${c.name}を手に入れた`);
+      });
+    },
+    sellCart() {
+      const tin = tradeIn(), c = cartT();
+      if (S.cart.type === 'basket') return;
+      if (cargoCount() > D.CARTS.basket.cap) return toast(`荷が多すぎる（背負い籠は${D.CARTS.basket.cap}個まで）`);
+      confirmBox(`${c.name}を売る`, `<p>${G(tin)} で売り、背負い籠に戻る。</p>` +
+        (S.guards > D.CARTS.basket.guards ? `<p class="sub">連れて歩ける護衛は${D.CARTS.basket.guards}人まで。残りとは別れる。</p>` : ''), '売る', () => {
+          S.gold += tin; S.cart = { type: 'basket', hp: 100 }; S.guards = Math.min(S.guards, D.CARTS.basket.guards);
+          settle();
+        });
+    },
+    shopClose() {
+      if (!S.shop || S.shop.town !== S.town) return;
+      const v = closeValue();
+      confirmBox('店をたたむ', `<p>店を手放し、${G(v)} を受け取る。評判はそのまま残る。</p>`, 'たたむ', () => { S.gold += v; S.shop = null; settle(); });
+    },
+    borrow() {
+      const max = Math.max(0, Math.floor(debtLimit() * C.borrowRate - S.debt));
+      if (max <= 0) return toast('これ以上は貸してくれない');
+      openQty({
+        title: '金を借りる', max, unit: '枚', okLabel: '借りる', init: Math.min(max, 50),
+        calc: (q) => `借金は ${fmt(S.debt + q)}枚 になる。<span class="sub">利子は1日およそ ${((S.debt + q) * C.interest).toFixed(1)}枚</span>`,
+        ok: (q) => { S.gold += q; S.debt += q; settle(); }
+      });
+    },
+    repay() {
+      const max = Math.floor(Math.min(S.gold, Math.ceil(S.debt)));
+      if (max <= 0) return;
+      openQty({
+        title: '借金を返す', max, unit: '枚', okLabel: '返す',
+        calc: (q) => `残りの借金 ${fmt(Math.max(0, S.debt - q))}枚`,
+        ok: (q) => { S.gold -= q; S.debt = Math.max(0, +(S.debt - q).toFixed(2)); if (S.debt < 0.5) S.debt = 0; S.rep[S.town] = Math.min(100, S.rep[S.town] + 0.5); settle(); }
+      });
+    },
+    mapBuy(d) {
+      const full = d.k === 'full', cost = full ? C.mapFull : C.mapLocal;
+      if (S.gold < cost) return toast('お金が足りない');
+      // このあたり＝2本の道でたどれる範囲
+      let set = new Set([S.town]);
+      for (let i = 0; i < (full ? 20 : 2); i++) for (const rid in D.ROADS) { const r = D.ROADS[rid]; if (set.has(r.a) || set.has(r.b)) { set = new Set([...set, r.a, r.b]); } }
+      let n = 0;
+      for (const t of set) { if (!S.named[t]) n++; S.named[t] = true; if (!S.seen[t]) S.seen[t] = 1; }
+      for (const rid in D.ROADS) { const r = D.ROADS[rid]; if (set.has(r.a) && set.has(r.b) && !S.roads[rid]) { S.roads[rid] = true; n++; } }
+      if (!n) return toast('この地図に、知らないことは載っていない');
+      S.gold -= cost;
+      notices.push({ title: '🗺️ 地図を買った', body: `<p>${full ? '国じゅう' : 'このあたり'}の町と道を書き写した。</p>` });
+      settle();
+    },
+
+    shopOpen() {
+      const L = C.shop[1], t = S.town;
+      if (S.rep[t] < L.rep) return toast(`この町の評判が足りない（${L.rep}必要）`);
+      if (S.gold < L.cost) return toast('お金が足りない');
+      confirmBox('露店を出す', `<p>${D.TOWNS[t].name}に露店を出す。費用 ${G(L.cost)}、場所代 1日${L.rent}枚。</p><p class="sub">この版では、店は1つだけ持てる。</p>`, '出す', () => {
+        S.gold -= L.cost; S.shop = { town: t, lv: 1, stock: {}, till: 0 }; settle();
+      });
+    },
+    shopUp() {
+      const N = C.shop[2], t = S.town;
+      if (!S.shop || S.shop.town !== t || S.shop.lv !== 1) return;
+      if (S.rep[t] < N.rep) return toast(`この町の評判が足りない（${N.rep}必要）`);
+      if (S.gold < N.cost) return toast('お金が足りない');
+      confirmBox('小さな店に建て替える', `<p>費用 ${G(N.cost)}。店賃と店番で1日${N.rent + N.wage}枚。</p>`, '建て替える', () => {
+        S.gold -= N.cost; S.shop.lv = 2;
+        notices.push({ title: '🏠 小さな店ができた', body: '<p>屋根のある、自分の店だ。毎日、店番が品を売ってくれる。</p>' });
+        settle();
+      });
+    },
+    shopTake() {
+      if (!S.shop || S.shop.town !== S.town || S.shop.till <= 0) return;
+      const n = S.shop.till; S.gold += n; S.shop.till = 0;
+      settle(); toast(`売上金 ${fmt(n)}枚 を受け取った`);
+    },
+    shopPut(d) {
+      const g = d.g, sh = S.shop, own = S.cargo[g];
+      if (!sh || sh.town !== S.town || !own) return;
+      const L = C.shop[sh.lv];
+      let units = 0; for (const k in sh.stock) units += sh.stock[k].qty;
+      if (!sh.stock[g] && Object.keys(sh.stock).length >= L.kinds) return toast(`${L.name}に置けるのは${L.kinds}種まで`);
+      const max = Math.min(own.qty, L.units - units);
+      if (max <= 0) return toast('店がいっぱい');
+      openQty({
+        title: `${D.GOODS[g].name}を預ける`, max, okLabel: '預ける',
+        calc: () => `<span class="sub">${L.every === 1 ? '毎日' : L.every + '日に1度'}、${L.rate}個ずつ売れる</span>`,
+        ok: (q) => {
+          const avg = own.cost / own.qty, it = sh.stock[g] || (sh.stock[g] = { qty: 0, cost: 0, age: own.age });
+          it.age = (it.age * it.qty + own.age * q) / (it.qty + q);
+          it.qty += q; it.cost += avg * q;
+          own.qty -= q; own.cost -= avg * q;
+          if (own.qty <= 0) delete S.cargo[g];
+          settle();
+        }
+      });
+    },
+
+    go(d) {
+      if (travel || !S.roads[d.r]) return;
+      const r = D.ROADS[d.r];
+      if (r.a !== S.town && r.b !== S.town) return;
+      startTravel(d.r, false);
+    }
+  };
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-a]');
+    if (!el || el.disabled) return;
+    const fn = actions[el.dataset.a];
+    if (fn) fn(el.dataset);
+  });
+
+  // ---------- 移動 ----------
+  function tlog(msg, cls) { travel.log.push(`<div class="${cls || ''}">${msg}</div>`); const el = $('#rlog'); if (el) el.innerHTML = travel.log.join(''); }
+  function startTravel(rid, caravan) {
+    const i = routeInfo(rid, caravan), r = i.r;
+    recordMemo(S.town);
+    travel = { rid, from: S.town, to: i.to, days: i.days, caravan, frac: 0, log: [], queue: [], paid: 0 };
+    if (i.toll) travel.queue.push('gate');
+    let p = C.banditBase[i.danger] * (1 + Math.min(1, cargoWorth() / 600) * 0.5) * (1 - 0.08 * S.guards);
+    if (caravan) p *= C.caravanSafety;
+    if (Math.random() < p) travel.queue.push('bandit');
+    if (Math.random() < i.breakP) travel.queue.push('break');
+    $('#tabs').classList.add('hidden');
+    $('#main').innerHTML = `<h2>${townName(travel.from)} → ${townName(travel.to)}</h2><div class="mapwrap"><canvas id="map"></canvas></div>` +
+      `<div class="card roadlog" id="rlog"></div>`;
+    window.scrollTo(0, 0);
+    tlog(`${caravan ? '隊商とともに' : D.ROAD_TYPES[r.type].name + 'を'}歩きだした。${i.days}日の道のり。${S.rain ? '雨が降っている。' : ''}`);
+    renderHud(); drawMap($('#map'), false);
+    walk(0.5, nextEvent);
+  }
+  function walk(target, cb) {
+    if (!travel) return;
+    travel.frac = Math.min(target, travel.frac + 0.1);
+    drawMap($('#map'), false);
+    if (travel.frac >= target - 1e-9) return setTimeout(cb, C.stepMs);
+    setTimeout(() => walk(target, cb), C.stepMs);
+  }
+  function nextEvent() {
+    if (!travel) return;
+    const ev = travel.queue.shift();
+    if (!ev) return walk(1, arrive);
+    if (ev === 'gate') gateEvent(); else if (ev === 'bandit') banditEvent(); else breakEvent();
+  }
+  const cont = (label) => [{ label: label || '先へ進む', cls: 'pri', fn: nextEvent }];
+
+  function gateEvent() {
+    const i = routeInfo(travel.rid, travel.caravan);
+    let body = `<p>関所だ。役人が荷をあらためる。</p>`;
+    const short = pay(i.toll);
+    body += `<p>通行税 ${G(i.toll)} を払った。${short ? `<span class="bad">足りない ${fmt(short)}枚はツケ（借金）になった。</span>` : ''}</p>`;
+    const cb = Object.keys(S.cargo).filter((g) => D.CONTRABAND.includes(g));
+    if (cb.length) {
+      if (Math.random() < C.contrabandFind) {
+        let n = 0; for (const g of cb) { n += S.cargo[g].qty; delete S.cargo[g]; }
+        const s2 = pay(C.contrabandFine);
+        S.rep[travel.to] = Math.max(0, S.rep[travel.to] - 8);
+        body += `<p class="bad">禁制品が見つかった。${n}個を没収され、罰金 ${C.contrabandFine}枚。${s2 ? 'ツケになった。' : ''}評判も落ちた。</p>`;
+        tlog('🚫 関所で禁制品を没収された。', 'bad');
+      } else {
+        body += `<p class="good">役人は荷の底までは見なかった。禁制品は見つからずにすんだ。</p>`;
+      }
+    }
+    tlog(`🏯 関所を通った（${i.toll}枚）。`);
+    renderHud();
+    modal({ title: '🏯 関所', body, buttons: cont() });
+  }
+
+  function banditEvent() {
+    const big = routeInfo(travel.rid).danger >= 3 ? Math.random() < 0.5 : Math.random() < 0.3;
+    const B = C.bandits[big ? 'gang' : 'thief'], ep = rnd(B.min, B.max), pp = power(travel.caravan);
+    if (S.gold < 1 && cargoCount() === 0) {
+      tlog(`${B.name}に囲まれたが、取るものが何もなかった。`);
+      return modal({ title: `🗡️ ${B.name}`, body: '<p>囲まれたが、籠の中は空、財布も空。あきれ顔で去っていった。</p>', buttons: cont() });
+    }
+    const prob = (pp * pp) / (pp * pp + ep * ep);
+    const odds = prob > 0.66 ? '<span class="good">有利</span>' : prob > 0.4 ? '五分五分' : '<span class="bad">不利</span>';
+    const flee = travel.caravan ? 0 : cartT().flee, toll = Math.ceil(B.tollBase + S.gold * B.tollRate);
+    const btns = [{ label: '⚔️ 戦う', cls: 'pri', fn: () => fight(prob, B) }];
+    if (!travel.caravan) btns.push({
+      label: `💨 逃げる（成功率 ${Math.round(flee * 100)}%）`, fn: () => {
+        if (Math.random() < flee) { tlog(`💨 ${B.name}から逃げ切った。`, 'good'); modal({ title: '逃げ切った', body: '<p>息が切れるまで走り、どうにか振り切った。</p>', buttons: cont() }); }
+        else modal({ title: '追いつかれた', body: '<p>逃げ切れない。背を向けたまま、不利な体勢で戦うしかない。</p>', buttons: [{ label: '⚔️ 応戦する', cls: 'pri', fn: () => fight(prob * 0.7, B) }] });
+      }
+    });
+    if (S.gold >= toll) btns.push({
+      label: `💰 通行料を払う（${toll}枚）`, fn: () => {
+        S.gold -= toll; tlog(`💰 ${B.name}に通行料 ${toll}枚 を払った。`); renderHud();
+        modal({ title: '見逃してもらった', body: `<p>${G(toll)} を渡すと、道をあけた。</p>`, buttons: cont() });
+      }
+    });
+    if (cargoCount() > 0) btns.push({
+      label: `📦 荷の${Math.round(B.take * 10)}割を渡す`, fn: () => {
+        const n = loseCargo(B.take); tlog(`📦 ${B.name}に荷 ${n}個 を渡した。`); renderHud();
+        modal({ title: '見逃してもらった', body: `<p>荷 ${n}個を置いていくと、道をあけた。</p>`, buttons: cont() });
+      }
+    });
+    modal({
+      title: `🗡️ ${B.name}だ！`,
+      body: `<p>${big ? '道の両側から、武器を持った男たちが現れた。' : '木陰から、刃物を持った男が飛び出してきた。'}</p>` +
+        `<p>こちらの力 <b>${pp}</b>（${travel.caravan ? '隊商の護衛つき' : '護衛' + S.guards + '人'}）<br>見立て：${odds}</p>`,
+      buttons: btns
+    });
+  }
+  function fight(prob, B) {
+    const win = Math.random() < prob;
+    modal({ title: '⚔️ 斬り合い', body: `<canvas id="fight"></canvas><p class="sub" style="text-align:center">砂ぼこりが舞う…</p>` });
+    playFight($('#fight'), win, () => {
+      let body;
+      if (win) {
+        const loot = rndi(B.loot[0], B.loot[1]);
+        S.gold += loot; S.stats.wins++; S.rep[travel.to] = Math.min(100, S.rep[travel.to] + 2);
+        body = `<p class="good">${B.name}を追い払った！</p><p>落としていった財布から ${G(loot)}。行く先の町で評判になるだろう。</p>`;
+        tlog(`⚔️ ${B.name}を追い払った。+${loot}枚`, 'good');
+      } else {
+        const lost = loseCargo(0.6), gold = Math.floor(S.gold * 0.35);
+        S.gold -= gold; S.stats.robbed++;
+        if (S.cart.type !== 'basket') S.cart.hp = Math.max(5, S.cart.hp - 30);
+        let g2 = '';
+        if (S.guards > 0 && Math.random() < 0.5) { S.guards--; g2 = '護衛が1人、逃げ出した。'; }
+        body = `<p class="bad">${B.name}に負けた…</p><p>荷 ${lost}個と ${G(gold)} を奪われた。${g2}</p>`;
+        tlog(`⚔️ ${B.name}に負け、荷と金を奪われた。`, 'bad');
+      }
+      renderHud();
+      modal({ title: win ? '勝った！' : '負けた…', body, buttons: cont() });
+    });
+  }
+  function breakEvent() {
+    const c = cartT();
+    travel.days += 1;
+    const dump = () => {
+      const n = loseCargo(0.4); S.cart.hp = Math.max(5, S.cart.hp - 20);
+      tlog(`🔧 ${c.name}が壊れ、荷 ${n}個 を捨てた。1日遅れた。`, 'bad'); renderHud();
+      modal({ title: '荷を捨てた', body: `<p>軽くするしかない。荷 ${n}個を道ばたに置き、だましだまし進む。</p>`, buttons: cont() });
+    };
+    const btns = [];
+    if (S.gold >= c.repair) btns.push({
+      label: `🔧 直してもらう（${c.repair}枚）`, cls: 'pri', fn: () => {
+        S.gold -= c.repair; tlog(`🔧 ${c.name}が壊れ、${c.repair}枚 で直した。1日遅れた。`); renderHud(); nextEvent();
+      }
+    });
+    if (cargoCount() > 0) btns.push({ label: '📦 荷を4割捨てて進む', fn: dump });
+    if (!btns.length) btns.push({ label: 'だましだまし進む', cls: 'pri', fn: () => { S.cart.hp = Math.max(5, S.cart.hp - 20); tlog(`🔧 ${c.name}が壊れた。1日遅れた。`, 'bad'); nextEvent(); } });
+    modal({
+      title: '🔧 車が壊れた',
+      body: `<p>${S.rain ? 'ぬかるみに車輪を取られ、' : '石に乗り上げ、'}${c.name}の車輪が割れた。1日の遅れ。</p>` +
+        `<p class="sub">通りがかりの職人に直してもらうか、荷を減らして進むか。</p>`,
+      buttons: btns
+    });
+  }
+  function arrive() {
+    const t = travel, T = D.TOWNS[t.to], type = D.ROADS[t.rid].type;
+    S.town = t.to;
+    if (S.cart.type !== 'basket') S.cart.hp = Math.max(5, S.cart.hp - rnd(1, 4) * (type === 'road' ? 1 : 2));
+    advance(t.days * 4 - (S.time % 4));   // 着くのは朝
+    travel = null; ui = { tab: 'market', dest: null };
+    if (S.dead) return gameOver();
+    const first = discover(t.to);
+    let body = `<p>${t.days}日かけて着いた。${first ? '<b class="good">はじめて訪れる町だ。地図に書きこんだ。</b>' : ''}</p>` + t.log.slice(1).join('');
+    if (first) body += `<p class="sub">${T.desc}</p>`;
+    if (T.gateTax) {  // 王都の門
+      const tax = Math.max(cargoCount() ? 3 : 0, Math.ceil(cargoWorth() * T.gateTax));
+      if (tax) { const s = pay(tax); body += `<p>門で入市税 ${G(tax)} を取られた。${s ? `<span class="bad">足りない ${fmt(s)}枚はツケになった。</span>` : ''}</p>`; }
+      const cb = Object.keys(S.cargo).filter((g) => banned(t.to, g));
+      if (cb.length && Math.random() < C.gateFind) {
+        let n = 0; for (const g of cb) { n += S.cargo[g].qty; delete S.cargo[g]; }
+        pay(C.contrabandFine); S.rep[t.to] = Math.max(0, S.rep[t.to] - 10);
+        body += `<p class="bad">門番に禁制品を見つけられた。${n}個を没収され、罰金 ${C.contrabandFine}枚。評判も落ちた。</p>`;
+      }
+    }
+    S.stats.trips++;
+    recordMemo(S.town);
+    notices.push({ title: `🚩 ${T.name}に着いた`, body, label: '町に入る' });
+    window.scrollTo(0, 0);
+    settle();
+  }
+
+  // 斬り合いの演出（勝ち負けは先に決まっていて、ここでは見せるだけ）
+  function playFight(cv, win, cb) {
+    const w = cv.clientWidth || 300, dpr = Math.min(window.devicePixelRatio || 1, 2), H = 150;
+    cv.style.height = H + 'px'; cv.width = Math.round(w * dpr); cv.height = Math.round(H * dpr);
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const gy = H * 0.72, DUR = 2.6, mine = 1 + Math.min(4, S.guards + (travel && travel.caravan ? 3 : 0)), foes = 3;
+    const man = (x, y, col, lean, down) => {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(down ? (lean > 0 ? -1.4 : 1.4) : lean * 0.12);
+      ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(0, -22); ctx.lineTo(0, -6); ctx.lineTo(-5, 4); ctx.moveTo(0, -6); ctx.lineTo(5, 4);
+      ctx.moveTo(0, -18); ctx.lineTo(lean * 10, -24); ctx.stroke();
+      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(0, -27, 5, 0, 7); ctx.fill();
+      ctx.strokeStyle = '#ddd'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(lean * 10, -24); ctx.lineTo(lean * 20, -34); ctx.stroke();
+      ctx.restore();
+    };
+    let start = null;
+    function frame(ts) {
+      if (!cv.isConnected) return;
+      if (start === null) start = ts;
+      const t = (ts - start) / 1000, end = t > 2.0;
+      ctx.fillStyle = '#d9c79a'; ctx.fillRect(0, 0, w, H);
+      ctx.fillStyle = '#8a7446'; ctx.fillRect(0, gy + 4, w, H);
+      const rush = Math.min(1, t / 0.7), clash = Math.sin(t * 14) * 4 * (end ? 0 : 1);
+      for (let i = 0; i < mine; i++) man(w * 0.12 + i * 16 + rush * w * 0.2 + clash, gy - (i % 2) * 6, i ? '#2f5d8a' : '#7a4a22', 1, end && !win);
+      for (let i = 0; i < foes; i++) man(w * 0.88 - i * 16 - rush * w * 0.2 - clash, gy - (i % 2) * 6, '#2a2a2a', -1, end && win);
+      if (t > 0.7 && !end) for (let i = 0; i < 5; i++) {   // 砂ぼこりと火花
+        ctx.fillStyle = `rgba(250,240,210,${0.5 - i * 0.08})`;
+        ctx.beginPath(); ctx.arc(w / 2 + Math.sin(t * 9 + i * 2) * 26, gy - 14 + Math.cos(t * 7 + i) * 12, 6 + i * 2, 0, 7); ctx.fill();
+      }
+      if (t < DUR) requestAnimationFrame(frame); else cb();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- 起動 ----------
+  const hadSave = load();
+  if (!hadSave) { newGame(); save(); }
+  render();
+  if (!hadSave) intro();
+  let rsT = 0;
+  window.addEventListener('resize', () => { clearTimeout(rsT); rsT = setTimeout(() => { if (travel) drawMap($('#map'), false); else if (ui.tab === 'map') render(); }, 200); });
+
+  // 動作確認用（テストやコンソールから中をのぞける）
+  window.__shokai = {
+    get state() { return S; }, get travel() { return travel; },
+    routeInfo, roadsFrom, buyNow, sellNow, mult, debtLimit, dailyCost, advance, settle, stage, power, fresh, sellsHere, banned, cargoCount, SAVE_KEY
+  };
+})();
