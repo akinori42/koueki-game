@@ -1,10 +1,10 @@
-// 背負い籠の商会（第2版）：ゲーム本体。数値やデータは js/data/ のファイルにある。
+// 背負い籠の商会（第3版：重さは kg、品物は袋・樽・反などの単位）：ゲーム本体。数値やデータは js/data/ のファイルにある。
 (function () {
   'use strict';
 
   const D = window.SHOKAI, C = D.CONFIG;
-  const SAVE_KEY = 'shokai-save-v2';      // 第1版（v1）とは形式がちがうので、保存場所も別
-  const SAVE_VERSION = 2;
+  const SAVE_KEY = 'shokai-save-v3';      // 重さの単位（kg）を変えたので、前の版（v1・v2）とは別の保存場所。古いセーブは読まず、消しもしない
+  const SAVE_VERSION = 3;
   const QN = ['朝', '昼', '夕', '夜'];
   const KIND = { village: '村', town: '町', capital: '王都', port: '港町' };
   const DANGER = ['安全', 'やや危険', '危険', 'とても危険'];
@@ -28,6 +28,8 @@
   const cartT = () => D.CARTS[S.cart.type];
   const other = (r, t) => (r.a === t ? r.b : r.a);
   const townName = (t) => (S.named[t] ? D.TOWNS[t].name : '？？？');
+  const U = (g) => D.GOODS[g].unit;                       // 品の単位（袋・樽・反など）
+  const qtyStr = (g, n) => `${n}${D.GOODS[g].unit}`;       // 「3袋」のような書き方
   function toast(msg) {
     const t = $('#toast');
     t.textContent = msg; t.classList.remove('hidden');
@@ -260,7 +262,7 @@
         const sh = D.GOODS[g].shelf;
         if (!sh) continue;
         store[g].age += S.rain ? 1.3 : 1;
-        if (store[g].age > sh) { dayNotes.push(`<span class="bad">🪰 ${where}${D.GOODS[g].name} ${store[g].qty}個が腐り、捨てるしかなかった。</span>`); delete store[g]; }
+        if (store[g].age > sh) { dayNotes.push(`<span class="bad">🪰 ${where}${D.GOODS[g].name} ${qtyStr(g, store[g].qty)}が腐り、捨てるしかなかった。</span>`); delete store[g]; }
       }
     };
     age(S.cargo, '');
@@ -308,7 +310,7 @@
     S.orders = S.orders.filter((o) => {
       if (d <= o.due) return true;
       S.rep[o.t] = Math.max(0, S.rep[o.t] - C.orderFailRep);
-      dayNotes.push(`<span class="bad">📜 ${D.TOWNS[o.t].name}の${D.TOWNS[o.t].who.name}との約束（${D.GOODS[o.g].name}${o.n}個）を守れなかった。評判が落ちた。</span>`);
+      dayNotes.push(`<span class="bad">📜 ${D.TOWNS[o.t].name}の${D.TOWNS[o.t].who.name}との約束（${D.GOODS[o.g].name}${qtyStr(o.g, o.n)}）を守れなかった。評判が落ちた。</span>`);
       tell('orderFail');
       return false;
     });
@@ -416,12 +418,12 @@
       const g = cand.splice(Math.floor(Math.random() * cand.length), 1)[0], G0 = D.GOODS[g];
       const src = Object.keys(D.TOWNS).filter((p) => sellsHere(p, g)), dist = Math.min.apply(null, src.map((p) => DIST[t][p]));
       const maxStock = Math.max.apply(null, src.map((p) => D.TOWNS[p].stock[g]));
-      const W = pick([8, 8, 30, 30, 70]);                      // 小口（籠でも運べる）〜大口（荷車がいる）
+      const W = pick([25, 25, 100, 100, 300]);                 // 小口（籠でも運べる 25kg）〜大口（ロバの荷車がいる 300kg）
       const n = clamp(Math.round(W / G0.w), 1, Math.max(1, Math.floor(maxStock * 1.2)));
       list.push({
         id: d + '-' + t + '-' + g, g, n, days: Math.ceil(dist * 2 * 1.4) + 5,
-        // 報酬 = 品の値打ちの8割 ＋ 運び賃（重さ × 道のり）。重い注文ほど割がいい
-        reward: Math.round(n * G0.base * 0.8 + n * G0.w * (1 + dist)), rep: C.orderRep + (n * G0.w >= 30 ? 3 : 0)
+        // 報酬 = 品の値打ちの8割 ＋ 運び賃（kg × 道のり）。重い注文ほど割がいい
+        reward: Math.round(n * G0.base * 0.8 + n * G0.w * C.orderFee * (1 + dist)), rep: C.orderRep + (n * G0.w >= 100 ? 3 : 0)
       });
     }
     S.offers[t] = { day: d, list };
@@ -494,7 +496,7 @@
     $('#hud').innerHTML =
       `<div class="hud1"><span>${where}</span><span class="gold">💰 ${fmt(S.gold)}枚</span></div>` +
       `<div class="hud2"><span>📅 ${timeStr()}</span><span>${S.rain ? '🌧' : '☀️'}</span>` +
-      `<span>${cartT().icon} ${cargoWeight()}/${cartT().cap}</span>` + (S.guards ? `<span>🛡${S.guards}</span>` : '') + `<span>${dueText()}</span></div>`;
+      `<span>${cartT().icon} ${cargoWeight()}/${cartT().cap}kg</span>` + (S.guards ? `<span>🛡${S.guards}</span>` : '') + `<span>${dueText()}</span></div>`;
   }
   function dueCard() {
     const o = owed(), left = daysLeft();
@@ -506,7 +508,8 @@
   }
 
   function tags(g) {
-    let h = `<span class="tag">重さ${D.GOODS[g].w}</span>`;
+    let h = `<span class="tag">1${D.GOODS[g].unit} ${D.GOODS[g].w}kg</span>`;
+    if (D.GOODS[g].lux) h += `<span class="tag gold">高級品</span>`;
     if (D.GOODS[g].shelf) h += `<span class="tag">傷む</span>`;
     if (D.CONTRABAND.includes(g)) h += `<span class="tag bad">禁制品</span>`;
     return h;
@@ -514,13 +517,13 @@
   function goodCard(g) {
     const G0 = D.GOODS[g], t = S.town, can = sellsHere(t, g), own = S.cargo[g], ban = banned(t, g), tr = trendOf(t, g);
     const f = own ? fresh(g, own.age) : 1, sp = sellNow(t, g, f);
-    let l2 = can ? `買値 <b>${fmt(buyNow(t, g))}枚</b>　在庫 ${Math.floor(S.stock[t][g])}　` : '';
+    let l2 = can ? `買値 <b>${fmt(buyNow(t, g))}枚</b>　在庫 ${qtyStr(g, Math.floor(S.stock[t][g]))}　` : '';
     l2 += ban ? `<span class="bad">この町では売れない</span>` : `売値 ${can ? '' : '<b>'}${fmt(sp)}枚${can ? '' : '</b>'}`;
     if (tr) l2 += ` <span class="${tr.m > 1 ? 'good' : 'bad'}">${tr.m > 1 ? '📈高騰中' : '📉値崩れ中'}</span>`;
     let l3 = '';
     if (own) {
       const avg = own.cost / own.qty;
-      l3 = `<div class="sub">所持 <b>${own.qty}</b>（仕入れ ${fmt(avg)}枚）` +
+      l3 = `<div class="sub">所持 <b>${qtyStr(g, own.qty)}</b>・${own.qty * G0.w}kg（仕入れ ${fmt(avg)}枚）` +
         (G0.shelf ? ` 鮮度 <span class="${f < 0.6 ? 'bad' : ''}">${Math.round(f * 100)}%</span>` : '') +
         (ban ? '' : `<span class="${sp >= avg ? 'good' : 'bad'}"> ${sp >= avg ? '▲利益' : '▼損'}</span>`) + `</div>`;
     }
@@ -534,8 +537,8 @@
   function orderCards() {
     return S.orders.map((o, i) => {
       const here = o.t === S.town, have = S.cargo[o.g] ? S.cargo[o.g].qty : 0, left = o.due - day();
-      return `<div class="card row"><div class="grow"><div class="name">📜 ${D.TOWNS[o.t].name}の${D.TOWNS[o.t].who.name}へ ${D.GOODS[o.g].name} ${o.n}個</div>` +
-        `<div class="sub"><span class="${left <= 3 ? 'bad' : ''}">あと${left}日</span> ／ 報酬 ${o.reward}枚 ／ 持っている ${have}個</div></div>` +
+      return `<div class="card row"><div class="grow"><div class="name">📜 ${D.TOWNS[o.t].name}の${D.TOWNS[o.t].who.name}へ ${D.GOODS[o.g].name} ${qtyStr(o.g, o.n)}（${o.n * D.GOODS[o.g].w}kg）</div>` +
+        `<div class="sub"><span class="${left <= 3 ? 'bad' : ''}">あと${left}日</span> ／ 報酬 ${o.reward}枚 ／ 持っている ${qtyStr(o.g, have)}</div></div>` +
         (here ? `<button class="b pri" data-a="deliver" data-i="${i}" ${have >= o.n ? '' : 'disabled'}>納める</button>` : '') + `</div>`;
     }).join('');
   }
@@ -546,16 +549,16 @@
     h += `<div class="card"><div class="sub">次の目標</div><div class="name">${goalText()}</div></div>`;
     if (S.orders.length) h += orderCards();
     if (S.rumors.length) h += `<div class="card"><div class="name">👂 耳にした噂</div><div class="sub">酒場の噂は外れることもある。</div>${S.rumors.map(rumorLine).join('')}</div>`;
-    h += `<h3>この町の特産（あと 重さ${freeWeight()} 積める）</h3>` + here.map(goodCard).join('');
+    h += `<h3>この町の特産（あと ${freeWeight()}kg 積める）</h3>` + here.map(goodCard).join('');
     const owned = Object.keys(S.cargo).filter((g) => !here.includes(g));
     if (owned.length) h += `<h3>持ってきた荷</h3>` + owned.map(goodCard).join('');
     h += heardTable();
     const all = Object.keys(D.GOODS).sort((a, b) => mult(S.town, b) - mult(S.town, a));
-    h += `<details class="card"><summary>この町の相場をすべて見る</summary><table class="t"><tr><th>品（重さ）</th><th>売値</th><th>ふだんとの差</th></tr>` +
+    h += `<details class="card"><summary>この町の相場をすべて見る</summary><table class="t"><tr><th>品（1つの重さ）</th><th>売値</th><th>ふだんとの差</th></tr>` +
       all.map((g) => {
         if (banned(S.town, g)) return `<tr><td>${D.GOODS[g].icon} ${D.GOODS[g].name}</td><td class="bad">禁制</td><td></td></tr>`;
         const pct = Math.round((mult(S.town, g) * (1 + S.market[S.town][g]) - 1) * 100);
-        return `<tr><td>${D.GOODS[g].icon} ${D.GOODS[g].name}（${D.GOODS[g].w}）</td><td>${fmt(sellNow(S.town, g))}枚</td>` +
+        return `<tr><td>${D.GOODS[g].icon} ${D.GOODS[g].name}（1${U(g)} ${D.GOODS[g].w}kg）</td><td>${fmt(sellNow(S.town, g))}枚</td>` +
           `<td class="${pct >= 15 ? 'good' : pct <= -15 ? 'bad' : ''}">${pct >= 0 ? '+' : ''}${pct}%</td></tr>`;
       }).join('') + `</table></details>`;
     return h;
@@ -706,7 +709,7 @@
       h += `<p class="sub">まだ行ったことがない。どんな町かも、何が売れるかもわからない。</p>`;
     }
     const worth = cargoWorth();
-    if (worth > 0) h += `<p class="sub">積み荷の値打ち ${fmt(worth)}枚。値打ちが大きいほど山賊に狙われ、関所の税も重くなる。</p>`;
+    if (worth > 0) h += `<p class="sub">積み荷 ${cargoWeight()}kg・値打ち ${fmt(worth)}枚。値打ちが大きいほど山賊に狙われ、関所の税も重くなる（高級品は軽いが、的になる）。</p>`;
     if (Object.keys(S.cargo).some((g) => D.GOODS[g].shelf)) h += `<p class="sub">🪰 傷む品を積んでいる。日数がかかるほど値が落ちる。</p>`;
     if (contraWorth() > 0) h += `<p class="bad sub">⚠ 禁制品を積んでいる。関所で見つかれば没収と罰金。</p>`;
     h += `<h3>道を選ぶ</h3>` + rids.filter((rid) => other(D.ROADS[rid], S.town) === t).map(routeBlock).join('');
@@ -740,8 +743,8 @@
     if (S.orders.length) h += orderCards();
     h += offers.length ? offers.map((o, i) => {
       const w = o.n * D.GOODS[o.g].w;
-      return `<div class="card row"><div class="grow"><div class="name">${D.GOODS[o.g].icon} ${D.GOODS[o.g].name}を ${o.n}個</div>` +
-        `<div class="sub">重さ ${w}${w > cart.cap ? '（<span class="bad">今の荷車では一度に運べない</span>）' : ''} ／ ${o.days}日以内 ／ 報酬 ${o.reward}枚・評判+${o.rep}</div>` +
+      return `<div class="card row"><div class="grow"><div class="name">${D.GOODS[o.g].icon} ${D.GOODS[o.g].name}を ${qtyStr(o.g, o.n)}</div>` +
+        `<div class="sub">${w}kg${w > cart.cap ? '（<span class="bad">今の荷車では一度に運べない</span>）' : ''} ／ ${o.days}日以内 ／ 報酬 ${o.reward}枚・評判+${o.rep}</div>` +
         `<div class="sub">遅れると評判が${C.orderFailRep}下がる。</div></div><button class="b pri" data-a="accept" data-i="${i}">受ける</button></div>`;
     }).join('') : `<p class="sub">いまは頼みごとがない。</p>`;
 
@@ -779,10 +782,11 @@
         const pr = c.price - tin;
         h += `<div class="card"><div class="row"><div class="grow"><div class="name">${c.icon} ${c.name}</div><div class="sub">${c.desc}</div></div>` +
           `<button class="b pri" data-a="buyCart" data-id="${id}">${pr >= 0 ? fmt(pr) + '枚' : '+' + fmt(-pr) + '枚'}</button></div>` +
-          `<div class="stat"><div><span>積める重さ</span> ${c.cap}</div><div><span>餌代</span> 1日${c.feed}枚</div>` +
+          `<div class="stat"><div><span>積める重さ</span> <b>${c.cap}kg</b></div><div><span>餌代</span> 1日${c.feed}枚</div>` +
           `<div><span>街道</span> ${c.speed.road <= 0.7 ? '速い' : c.speed.road <= 0.95 ? 'やや速い' : '普通'}</div>` +
           `<div><span>山道</span> ${c.speed.trail >= 1.4 ? '苦手' : c.speed.trail >= 1.1 ? 'やや遅い' : '普通'}</div>` +
-          `<div><span>護衛</span> ${c.guards}人まで</div><div><span>鉄なら</span> ${Math.floor(c.cap / D.GOODS.iron.w)}個</div></div></div>`;
+          `<div><span>護衛</span> ${c.guards}人まで</div><div><span>麦なら</span> ${Math.floor(c.cap / D.GOODS.grain.w)}袋</div>` +
+          `<div><span>ワインなら</span> ${Math.floor(c.cap / D.GOODS.wine.w)}樽</div><div><span>今の${cart.name}</span> ${cart.cap}kg</div></div></div>`;
       }
       if (tin) h += `<div class="card row"><div class="grow">今の${cart.name}を売る<div class="sub">背負い籠に戻る。苦しいときの最後の手。</div></div>` +
         `<button class="b" data-a="sellCart">+${tin}枚</button></div>`;
@@ -860,11 +864,11 @@
         C.loan.dues.map((v, i) => (i < S.loan.n ? `<s>${v}</s>` : i === S.loan.n ? `<b class="gold">${v}</b>` : v)).join(' → ') + ` 枚</div></div>`;
     }
     h += `<h3>荷車と護衛</h3><div class="card"><div class="name">${cart.icon} ${cart.name}</div><div class="sub">${cart.desc}</div>` +
-      `<div class="stat"><div><span>荷の重さ</span> ${cargoWeight()}/${cart.cap}</div><div><span>具合</span> ${Math.round(S.cart.hp)}%</div>` +
+      `<div class="stat"><div><span>荷の重さ</span> ${cargoWeight()}/${cart.cap}kg</div><div><span>具合</span> ${Math.round(S.cart.hp)}%</div>` +
       `<div><span>護衛</span> ${S.guards}/${cart.guards}人</div><div><span>戦う力</span> ${power(false)}</div></div></div>`;
     const cg = Object.keys(S.cargo);
-    h += `<h3>荷（値打ち ${fmt(cargoWorth())}枚）</h3><div class="card">` + (cg.length ? cg.map((g) => `<div>${D.GOODS[g].icon} ${D.GOODS[g].name} × ${S.cargo[g].qty}` +
-      ` <span class="sub">重さ${S.cargo[g].qty * D.GOODS[g].w}` + (D.GOODS[g].shelf ? `・鮮度${Math.round(fresh(g, S.cargo[g].age) * 100)}%` : '') + `</span></div>`).join('') : `<span class="sub">空っぽ</span>`) + `</div>`;
+    h += `<h3>荷（値打ち ${fmt(cargoWorth())}枚）</h3><div class="card">` + (cg.length ? cg.map((g) => `<div>${D.GOODS[g].icon} ${D.GOODS[g].name} ${qtyStr(g, S.cargo[g].qty)}` +
+      ` <span class="sub">${S.cargo[g].qty * D.GOODS[g].w}kg` + (D.GOODS[g].shelf ? `・鮮度${Math.round(fresh(g, S.cargo[g].age) * 100)}%` : '') + `</span></div>`).join('') : `<span class="sub">空っぽ</span>`) + `</div>`;
     const vis = Object.keys(D.TOWNS).filter((t) => S.seen[t] === 2);
     h += `<h3>町の評判（訪れた町 ${vis.length}/${Object.keys(D.TOWNS).length}）</h3><div class="card stat">` +
       vis.map((t) => `<div><span>${D.TOWNS[t].name}</span> ${Math.floor(S.rep[t])}${S.pass[t] ? ' 🪪' : ''}</div>`).join('') + `</div>` +
@@ -875,9 +879,10 @@
     return h;
   }
   function helpBody() {
-    return `<p>① <b>市場</b>で特産を買う。品には<b>重さ</b>があり、籠にはわずかしか入らない。売り買いを始めると1刻（1日の4分の1）進む。</p>` +
+    return `<p>① <b>市場</b>で特産を買う。品は袋・樽・反などで数え、それぞれ<b>重さ（kg）</b>がある。背負い籠に入るのは${D.CARTS.basket.cap}kgまで。売り買いを始めると1刻（1日の4分の1）進む。</p>` +
       `<p>② <b>地図</b>で隣の町を選び、道を決めて出発する。</p><p>③ 着いた町で売る。差額がもうけ。</p>` +
       `<p>④ <b>${C.loan.every}日ごと</b>に親の借金を納める。額は上がっていく。足りなければ差し押さえ、何も残らなければ<b>破産で最初から</b>。</p>` +
+      `<p class="sub">麦・塩・樽・鉄のような<b>重くて安い品</b>ほど、産地を離れると値が倍近くになる。布や香辛料のような<b>軽くて高い品</b>は、どこでも1〜3割しか変わらず、在庫も少ない。稼ぎは、運んだ重さでほぼ決まる。</p>` +
       `<p class="sub">特産の在庫には限りがあり、売りこんだ町の値はなかなか戻らない。同じ道の往復では続かない。</p>` +
       `<p class="sub">となり町の売値は「◯日前に聞いた値」。値は日々動く。</p>` +
       `<p class="sub">値打ちのある荷ほど山賊に狙われ、関所の税（荷の値打ちの${Math.round(C.gateTax * 100)}%）も重くなる。関所を預かる町で評判を上げれば通行手形がもらえる。</p>` +
@@ -905,10 +910,10 @@
       const g = d.g, t = S.town;
       if (!sellsHere(t, g)) return;
       const max = maxBuy(t, g);
-      if (max <= 0) return toast(Math.floor(S.stock[t][g]) <= 0 ? '売り切れ。数日待てば入る' : freeWeight() < D.GOODS[g].w ? '重くてもう積めない' : 'お金が足りない');
+      if (max <= 0) return toast(Math.floor(S.stock[t][g]) <= 0 ? '売り切れ。数日待てば入る' : freeWeight() < D.GOODS[g].w ? `重くてもう積めない（1${U(g)} ${D.GOODS[g].w}kg、空きは${freeWeight()}kg）` : 'お金が足りない');
       openQty({
-        title: `${D.GOODS[g].name}を買う`, max, okLabel: '買う',
-        calc: (q) => { const r = quote(t, g, q, 1); return `合計 ${G(r.tot)}　<span class="sub">重さ ${q * D.GOODS[g].w}（残り ${freeWeight() - q * D.GOODS[g].w}）</span>`; },
+        title: `${D.GOODS[g].name}を買う（1${U(g)} ${D.GOODS[g].w}kg）`, max, okLabel: '買う', unit: U(g),
+        calc: (q) => { const r = quote(t, g, q, 1); return `合計 ${G(r.tot)}　<span class="sub">${q * D.GOODS[g].w}kg（積めるのはあと ${freeWeight() - q * D.GOODS[g].w}kg）</span>`; },
         ok: (q) => {
           const r = quote(t, g, q, 1);
           S.gold -= r.tot; S.market[t][g] = r.dev; S.stock[t][g] -= q; addCargo(g, q, r.tot);
@@ -921,7 +926,7 @@
       if (!own || banned(t, g)) return;
       const avg = own.cost / own.qty, f = fresh(g, own.age);
       openQty({
-        title: `${D.GOODS[g].name}を売る`, max: own.qty, okLabel: '売る',
+        title: `${D.GOODS[g].name}を売る`, max: own.qty, okLabel: '売る', unit: U(g),
         calc: (q) => {
           const r = quote(t, g, q, -1, f), pf = r.tot - avg * q;
           return `合計 ${G(r.tot)}　<span class="${pf >= 0 ? 'good' : 'bad'}">${pf >= 0 ? '利益 +' : '損 '}${fmt(pf)}枚</span>`;
@@ -945,7 +950,7 @@
       const who = D.TOWNS[S.town].who, src = Object.keys(D.TOWNS).filter((p) => sellsHere(p, o.g) && S.named[p]).map((p) => D.TOWNS[p].name);
       notices.push({
         title: `📜 ${who.name}の頼み`,
-        body: `<p class="story">「${D.GOODS[o.g].name}を${o.n}個、${o.days}日のうちに。頼んだよ。」</p>` +
+        body: `<p class="story">「${D.GOODS[o.g].name}を${qtyStr(o.g, o.n)}、${o.days}日のうちに。頼んだよ。」</p>` +
           `<p class="sub">${src.length ? '産地：' + src.join('・') : '産地はまだ知らない。酒場で聞いてみよう。'}</p>`
       });
       settle();
@@ -959,7 +964,7 @@
       S.gold += o.reward; S.stats.profit += o.reward - avg * o.n; S.stats.orders++;
       S.rep[o.t] = Math.min(100, S.rep[o.t] + o.rep);
       S.orders.splice(+d.i, 1);
-      notices.push({ title: '📜 約束を果たした', body: `<p>${D.TOWNS[o.t].who.name}に${D.GOODS[o.g].name}${o.n}個を納めた。</p><p>報酬 ${G(o.reward)}　評判 +${o.rep}</p>` });
+      notices.push({ title: '📜 約束を果たした', body: `<p>${D.TOWNS[o.t].who.name}に${D.GOODS[o.g].name}${qtyStr(o.g, o.n)}を納めた。</p><p>報酬 ${G(o.reward)}　評判 +${o.rep}</p>` });
       tell('order1');
       tradeTick(); settle();
     },
@@ -1048,7 +1053,7 @@
     sellCart() {
       const tin = tradeIn(), c = cartT();
       if (S.cart.type === 'basket') return;
-      if (cargoWeight() > D.CARTS.basket.cap) return toast(`荷が重すぎる（背負い籠は重さ${D.CARTS.basket.cap}まで）`);
+      if (cargoWeight() > D.CARTS.basket.cap) return toast(`荷が重すぎる（背負い籠は${D.CARTS.basket.cap}kgまで）`);
       confirmBox(`${c.name}を売る`, `<p>${G(tin)} で売り、背負い籠に戻る。護衛とも別れる。</p>`, '売る', () => {
         S.gold += tin; S.cart = { type: 'basket', hp: 100 }; S.guards = 0;
         settle();
@@ -1130,7 +1135,7 @@
       const max = Math.min(own.qty, L.units - units);
       if (max <= 0) return toast('店がいっぱい');
       openQty({
-        title: `${D.GOODS[g].name}を預ける`, max, okLabel: '預ける',
+        title: `${D.GOODS[g].name}を預ける`, max, okLabel: '預ける', unit: U(g),
         calc: () => `<span class="sub">${L.every === 1 ? '毎日' : L.every + '日に1度'}、${L.rate}個ずつ売れる</span>`,
         ok: (q) => {
           const avg = own.cost / own.qty, it = sh.stock[g] || (sh.stock[g] = { qty: 0, cost: 0, age: own.age });

@@ -9,7 +9,7 @@ SHOKAI.CONFIG = {
   tradeTime: 1,
 
   // 親の借金：every 日ごとに dues の額を順に納める。すべて納めれば完済
-  loan: { every: 30, dues: [50, 130, 300, 500, 800, 1200, 1800, 2500] },
+  loan: { every: 30, dues: [50, 150, 400, 800, 1300, 1900, 2600, 3300] },
   // 追加の借り（ツケ）：次の返済日にまとめて取り立てられる
   tabInterest: 0.015,     // 1日の利子
   tabLimit: 150,          // 自分から借りられる上限
@@ -66,6 +66,7 @@ SHOKAI.CONFIG = {
   orderRefresh: 6,        // 町の依頼が入れ替わる日数
   orderRep: 6,            // 成功したときの評判
   orderFailRep: 8,        // 失敗したときに下がる評判
+  orderFee: 0.25,         // 依頼の運び賃：1kg を1日ぶん運ぶごとの枚数（報酬 = 品の値打ちの8割 + kg × orderFee ×（1 + 産地までの日数））
 
   // 町
   rumorCost: 3,

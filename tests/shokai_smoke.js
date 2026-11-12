@@ -1,9 +1,9 @@
-// 「背負い籠の商会」第2版（shokai/）の自動テスト。ブラウザなしで読み込み、仕組みとバランスを確かめる。
+// 「背負い籠の商会」第3版（shokai/・重さは kg）の自動テスト。ブラウザなしで読み込み、仕組みとバランスを確かめる。
 // 使い方： node tests/shokai_smoke.js
 const fs = require('fs'), vm = require('vm'), path = require('path');
 const ROOT = path.join(__dirname, '..', 'shokai');
 const FILES = ['js/data/config.js', 'js/data/goods.js', 'js/data/towns.js', 'js/data/carts.js', 'js/data/story.js', 'js/game.js'];
-const KEY = 'shokai-save-v2';
+const KEY = 'shokai-save-v3';
 
 let fails = 0;
 function check(name, ok, detail) {
@@ -126,15 +126,17 @@ function testStart() {
   check('最初の返済は30日後', e.g.daysLeft() === 30 && e.g.owed() === D.CONFIG.loan.dues[0]);
   const seen2 = Object.keys(S.seen).filter((t) => S.seen[t] === 2), seen1 = Object.keys(S.seen).filter((t) => S.seen[t] === 1);
   check('地図は出発地だけ。隣の町は「？」', seen2.length === 1 && seen1.length >= 2 && seen1.every((t) => !S.named[t]));
-  check('保存名が第1版・航海版と別', e.g.SAVE_KEY === KEY && !!e.store[KEY] && !e.store['shokai-save-v1'] && !e.store['kaze-to-ho-save-v1']);
+  check('保存名が前の版・航海版と別', e.g.SAVE_KEY === KEY && !!e.store[KEY] && !e.store['shokai-save-v1'] && !e.store['shokai-save-v2'] && !e.store['kaze-to-ho-save-v1']);
   for (const t of ['market', 'map', 'town', 'book']) { e.act('tab', { id: t }); if (e.main.innerHTML.length < 200) fails++; }
   check('4つの画面が描ける', e.main.innerHTML.length > 200);
   check('画面に返済の期限と額が出ている', /返済 あと30日/.test(e.els['#hud'].innerHTML));
   S.gold = 77; e.g.settle();
   const e2 = boot(Object.assign({}, e.store));
   check('続きから再開できる（導入は出ない）', e2.g.state.gold === 77 && !e2.open());
-  const e3 = boot({ 'shokai-save-v1': '{"v":1,"gold":9999}' });
-  check('第1版のセーブは読みこまず、消しもしない', e3.g.state.gold === D.CONFIG.startGold && e3.store['shokai-save-v1'] === '{"v":1,"gold":9999}');
+  const old2 = '{"v":2,"gold":9999,"cargo":{"grain":{"qty":2,"cost":12,"age":0}}}';
+  const e3 = boot({ 'shokai-save-v1': '{"v":1,"gold":9999}', 'shokai-save-v2': old2 });
+  check('前の版（v1・v2）のセーブがあっても、新しく始まる', e3.g.state.gold === D.CONFIG.startGold && e3.g.state.time === 0 && /父の残したもの/.test(e3.title()));
+  check('前の版のセーブは消さずに残す', e3.store['shokai-save-v1'] === '{"v":1,"gold":9999}' && e3.store['shokai-save-v2'] === old2);
   // 節目の場面
   S.gold = 500;
   withRandom(0.99, () => e.travel('r1'));
@@ -152,15 +154,33 @@ function testWeight() {
   console.log('■ 重さ・在庫・値の動き');
   const e = fresh(), S = e.g.state, D = e.D;
   S.gold = 5000;
-  check('背負い籠で運べるのは、麦2個・鉄1個・毛織物1個だけ', Math.floor(D.CARTS.basket.cap / D.GOODS.grain.w) === 2 && Math.floor(D.CARTS.basket.cap / D.GOODS.iron.w) === 1 && Math.floor(D.CARTS.basket.cap / D.GOODS.cloth.w) === 1);
-  check('お金があっても、重さの限界までしか買えない', e.g.maxBuy('hashibami', 'grain') === 2, e.g.maxBuy('hashibami', 'grain') + '個');
+  check('荷車の積載量は 30kg・120kg・350kg・700kg', D.CARTS.basket.cap === 30 && D.CARTS.handcart.cap === 120 && D.CARTS.donkey.cap === 350 && D.CARTS.horse.cap === 700);
+  const per = (c, g) => Math.floor(D.CARTS[c].cap / D.GOODS[g].w);
+  check('背負い籠に入るのは、麦3袋・ワイン1樽・鉄1束・毛織物7反', per('basket', 'grain') === 3 && per('basket', 'wine') === 1 && per('basket', 'iron') === 1 && per('basket', 'cloth') === 7);
+  check('馬車なら麦70袋・ワイン35樽', per('horse', 'grain') === 70 && per('horse', 'wine') === 35);
+  check('品物には現実の単位と重さ（kg）がある', Object.values(D.GOODS).every((x) => x.unit && x.w >= 1) && D.GOODS.grain.unit === '袋' && D.GOODS.wine.unit === '樽' && D.GOODS.cloth.unit === '反' && D.GOODS.grain.w === 10 && D.GOODS.wine.w === 20 && D.GOODS.spice.w === 1);
+  const dens = (g) => D.GOODS[g].base / D.GOODS[g].w;
+  check('麦や塩は安くて重く、布や香辛料は高くて軽い', dens('grain') < dens('salt') && dens('salt') < dens('wool') && dens('wool') < dens('honey') && dens('honey') < dens('linen') && dens('linen') < dens('cloth') && dens('cloth') < dens('spice'), `1kgあたり 麦${dens('grain')}枚 / 羊毛${dens('wool').toFixed(1)}枚 / 毛織物${dens('cloth').toFixed(1)}枚 / 香辛料${dens('spice')}枚`);
+  // 値段の差：重くて安い品は倍近く、軽くて高い品は1〜3割
+  const spread = (g) => { const v = Object.keys(D.TOWNS).filter((t) => !(D.TOWNS[t].ban || []).includes(g)).map((t) => D.TOWNS[t].prices[g] == null ? 1 : D.TOWNS[t].prices[g]); const src = Object.keys(D.TOWNS).filter((t) => D.TOWNS[t].stock[g] != null).map((t) => D.TOWNS[t].prices[g]); return { far: Math.max.apply(null, v) / Math.min.apply(null, src), prod: Math.min.apply(null, src) }; };
+  check('重くて安い品は、産地を離れると値が倍以上になる', ['grain', 'salt', 'wine', 'iron'].every((g) => spread(g).far >= 2.4), ['grain', 'salt', 'wine', 'iron'].map((g) => D.GOODS[g].name + '×' + spread(g).far.toFixed(1)).join(' '));
+  const lux = Object.keys(D.GOODS).filter((g) => D.GOODS[g].lux && !D.CONTRABAND.includes(g));
+  check('軽くて高い品は、売値で見て産地の1〜3割増しまで', lux.every((g) => { const x = spread(g); const top = x.far * x.prod * D.CONFIG.sellRate / x.prod; return top >= 1.0 && top <= 1.4; }), lux.map((g) => D.GOODS[g].name + '×' + (spread(g).far * D.CONFIG.sellRate).toFixed(2)).join(' '));
+  const maxStock = (g) => Math.max.apply(null, Object.keys(D.TOWNS).map((t) => D.TOWNS[t].stock[g] || 0));
+  check('高級品は在庫が少ない', Object.keys(D.GOODS).filter((g) => D.GOODS[g].lux).every((g) => maxStock(g) <= 14) && ['grain', 'salt', 'fish'].every((g) => maxStock(g) >= 50));
+  check('お金があっても、重さの限界までしか買えない', e.g.maxBuy('hashibami', 'grain') === 3, '麦' + e.g.maxBuy('hashibami', 'grain') + '袋');
   const t0 = S.time;
-  e.qty('buy', { g: 'grain' });
+  e.qty('buy', { g: 'grain' }, 2);
   check('売り買いを始めると時間が1刻進む', S.time === t0 + D.CONFIG.tradeTime);
-  check('買うと重さが増える', e.g.cargoWeight() === 6 && e.g.freeWeight() === 2);
+  check('買うと重さ（kg）が増える', e.g.cargoWeight() === 20 && e.g.freeWeight() === 10);
   e.qty('buy', { g: 'wool' });
   e.act('buy', { g: 'wool' });
-  check('重さが足りないと買えない', S.cargo.wool.qty === 1 && e.g.freeWeight() === 0 && !e.open());
+  check('空きが足りないと買えない（羊毛1俵8kg、空き2kg）', S.cargo.wool.qty === 1 && e.g.freeWeight() === 2 && !e.open());
+  e.act('tab', { id: 'market' });
+  check('市場に単位と重さが出る（1袋 10kg、在庫◯袋、あと◯kg）', /1袋 10kg/.test(e.main.innerHTML) && /在庫 \d+袋/.test(e.main.innerHTML) && /あと 2kg 積める/.test(e.main.innerHTML) && /2袋<\/b>・20kg/.test(e.main.innerHTML));
+  check('上部に荷の重さが kg で出る', /28\/30kg/.test(e.els['#hud'].innerHTML));
+  e.act('tab', { id: 'book' });
+  check('帳簿に荷の重さが kg で出る', /28\/30kg/.test(e.main.innerHTML) && /麦 2袋/.test(e.main.innerHTML));
   check('同じ刻のうちは、続けて売り買いしても時間は進まない', S.time === t0 + D.CONFIG.tradeTime);
   check('荷車が大きいほど重い品を運べる', D.CARTS.handcart.cap >= D.CARTS.basket.cap * 3 && D.CARTS.donkey.cap >= D.CARTS.handcart.cap * 2 && D.CARTS.horse.cap > D.CARTS.donkey.cap);
   // 在庫
@@ -237,7 +257,7 @@ function testLoan() {
   check('取りすぎたぶんは返ってくる', S.gold > 0);
   e.closeAll(); S.gold = e.g.dailyCost().total * 30; to30(e);
   check('次は荷車を差し押さえられ、背負い籠に戻る', S.cart.type === 'basket' && S.loan.n === 2 && !S.dead); e.closeAll();
-  S.cargo = { spice: { qty: 3, cost: 420, age: 0 } }; S.gold = e.g.dailyCost().total * 30 + 50; to30(e);
+  S.cargo = { spice: { qty: 5, cost: 800, age: 0 } }; S.gold = e.g.dailyCost().total * 30 + 50; to30(e);   // 荷の値打ち1000枚（差し押さえでは半値）
   check('次は荷を取り上げられる', e.g.cargoCount() === 0 && S.loan.n === 3 && !S.dead); e.closeAll();
   S.gold = 0; to30(e);
   check('何も残らなければ破産する', S.dead === true && /💀/.test(e.title()) && /父と同じ道/.test(e.text()));
@@ -338,7 +358,7 @@ function testOrders() {
   const offers = withRandom(seeded(7), () => e.g.offersOf('kawabe'));
   check('町の顔役が頼みごとを出している', offers.length >= 1 && offers.every((o) => o.n > 0 && o.days > 0 && o.reward > 0 && !e.g.sellsHere('kawabe', o.g)), offers.map((o) => `${D.GOODS[o.g].name}${o.n}個・${o.days}日・${o.reward}枚`).join(' / '));
   e.act('tab', { id: 'town' });
-  check('町の画面に頼みごとが出る（顔役の名前つき）', /ゴンゾの頼み/.test(e.main.innerHTML) && /日以内/.test(e.main.innerHTML));
+  check('町の画面に頼みごとが出る（顔役の名前つき）', /ゴンゾの頼み/.test(e.main.innerHTML) && /日以内/.test(e.main.innerHTML) && /麦なら 12袋/.test(e.main.innerHTML.replace(/<[^>]+>/g, '')));
   const o = offers[0], g = o.g, n = o.n, reward = o.reward, repGain = o.rep;
   e.act('accept', { i: '0' }); e.closeAll();
   check('頼みを受けると、期限つきの約束になる', S.orders.length === 1 && S.orders[0].due === Math.floor(S.time / 4) + o.days);
@@ -358,8 +378,10 @@ function testOrders() {
   check('同時に受けられる数には限りがある', S.orders.length === C.orderMax);
   // 報酬の重さとの関係
   const big = { n: 14, w: D.GOODS.iron.w }, small = { n: 2, w: D.GOODS.iron.w };
-  const rw = (x) => Math.round(x.n * D.GOODS.iron.base * 0.8 + x.n * x.w * (1 + 3));
-  check('重い注文ほど報酬が大きい（荷車がないと運べない）', rw(big) > rw(small) * 6 && big.n * big.w > D.CARTS.handcart.cap);
+  const rw = (x) => Math.round(x.n * D.GOODS.iron.base * 0.8 + x.n * x.w * C.orderFee * (1 + 3));
+  check('重い注文ほど報酬が大きい（荷車がないと運べない）', rw(big) > rw(small) * 6 && big.n * big.w > D.CARTS.handcart.cap, `鉄14束＝${big.n * big.w}kg`);
+  e.act('tab', { id: 'town' });
+  check('頼みごとに単位と重さ（kg）が出る', /を \d+(袋|樽|束|籠|俵|壺|反)/.test(e.main.innerHTML) && /\d+kg/.test(e.main.innerHTML));
 }
 
 // ---------- 9. 荷車・隊商・店 ----------
