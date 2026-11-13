@@ -37,11 +37,11 @@ SHOKAI.CALENDAR = {
   ],
   events: [
     { id: 'fest',    name: '王都の春祭り',     season: 'spring', from: 17, to: 23, t: 'oto',
-      goods: { wine: 1.6, honey: 1.5, fruit: 1.4, cloth: 1.25 }, desc: '王都で酒と甘いものが飛ぶように売れる' },
+      goods: { wine: 2.0, honey: 1.8, fruit: 1.6, cloth: 1.4 }, desc: '王都で酒と甘いものが、ふだんの倍の値で売れる' },
     { id: 'regatta', name: '港の夏市',         season: 'summer', from: 12, to: 17, t: 'shiokaze',
-      goods: { wine: 1.5, fruit: 1.5, linen: 1.2 }, desc: '船が集まり、港町で酒と果物が高い' },
+      goods: { wine: 1.8, fruit: 1.7, iron: 1.4, linen: 1.3 }, desc: '船が集まり、港町で酒・果物・鉄が高い' },
     { id: 'fair',    name: 'カワベの秋の大市', season: 'autumn', from: 12, to: 17, t: 'kawabe',
-      all: 1.2, desc: 'カワベで何でも2割高く売れる' },
+      all: 1.25, desc: 'カワベで何でも高く売れる' },
     { id: 'hoard',   name: '冬ごもりの買いだめ', season: 'winter', from: 0, to: 8,
       goods: { grain: 1.2, salt: 1.3, wine: 1.2 }, desc: '国じゅうで麦・塩・酒が高い' }
   ]

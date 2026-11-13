@@ -92,6 +92,17 @@ details.card summary { font-weight: 700; padding: 6px 0; cursor: pointer; }
 .card.tally { border-color: #e9b949; }
 .total { font-size: 20px; font-weight: 700; margin-top: 6px; }
 #scene, #home { touch-action: manipulation; }
+
+/* 商人の能力・旅日記 */
+.hit { display: inline-block; font-size: 12px; color: #9fd0ff; border: 1px solid #3f6c93; border-radius: 8px; padding: 0 6px; margin: 2px 0; }
+.strow { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 13px; margin: 4px 0; }
+.strow .st b { color: #e9b949; font-size: 15px; }
+.strow1 { display: flex; align-items: baseline; gap: 6px; margin-top: 6px; font-size: 14px; }
+.strow1 .stn { width: 82px; flex-shrink: 0; }
+.strow1 .bar { color: #e9b949; letter-spacing: 1px; font-size: 11px; }
+.stdoes { margin-left: 2px; }
+.diary { padding: 4px 0; border-top: 1px dashed #5a4630; font-size: 14px; }
+h3 + .card.goal { margin-top: 0; }
 .roadlog { font-size: 14px; min-height: 60px; }
 
 #modal {

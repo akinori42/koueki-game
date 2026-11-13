@@ -1,11 +1,12 @@
-// 「背負い籠の商会」第4版（shokai/）の自動テスト。ブラウザなしで読み込み、仕組みとバランスを確かめる。
+// 「背負い籠の商会」第5版（shokai/）の自動テスト。ブラウザなしで読み込み、仕組みとバランスを確かめる。
 // 使い方： node tests/shokai_smoke.js           （全部）
 //          node tests/shokai_smoke.js rumors    （一部だけ。名前は一番下の tests を参照）
 const fs = require('fs'), vm = require('vm'), path = require('path');
 const ROOT = path.join(__dirname, '..', 'shokai');
-const FILES = ['js/data/config.js', 'js/data/goods.js', 'js/data/towns.js', 'js/data/carts.js', 'js/data/calendar.js', 'js/data/story.js', 'js/game.js'];
-const KEY = 'shokai-save-v4', REC = 'shokai-records';
+const FILES = ['js/data/config.js', 'js/data/goods.js', 'js/data/towns.js', 'js/data/carts.js', 'js/data/calendar.js', 'js/data/people.js', 'js/data/story.js', 'js/game.js'];
+const KEY = 'shokai-save-v5', OLD = 'shokai-save-v4', REC = 'shokai-records';
 
+const TRACE = process.argv.includes('--trace');   // 自動商人の足どりを1行ずつ出す（調べもの用）
 let fails = 0;
 function check(name, ok, detail) {
   if (!ok) fails++;
@@ -104,7 +105,10 @@ function boot(store) {
   e.rest = (n) => { for (let i = 0; i < (n || 1); i++) { e.act('rest'); if (e.bust()) return; e.closeAll(); } };
   return e;
 }
-const fresh = () => { const e = boot(); e.closeAll(); return e; };
+// 新しく始めて、導入を閉じる。商人の能力は「すべて3（ふつう）」、難しさは「ふつう」にそろえる（数値のテストがぶれないように）。
+// raw = true なら、選んだ商人の能力をそのまま使う
+function neutral(e) { const m = e.g.state.me; if (m) { for (const k in m.st) m.st[k] = 3; m.use = {}; m.up = {}; } e.g.state.diff = 'normal'; return e; }
+const fresh = (raw) => { const e = boot(); e.closeAll(); return raw ? e : neutral(e); };
 // 国の中の町と道をすべて知っている状態にする（仕組みを個別に確かめるとき用）
 function knowAll(e) { const S = e.g.state; for (const t in e.D.TOWNS) if (e.g.inPlay(t)) { S.seen[t] = 2; S.named[t] = true; } for (const r in e.D.ROADS) if (e.g.roadUsable(r)) S.roads[r] = true; }
 const html = (e) => e.main.innerHTML;
@@ -145,7 +149,7 @@ function testStart() {
   console.log('■ はじまり・物語・保存');
   const e = boot(), S = e.g.state, D = e.D;
   check('親の借金の導入から始まる', /父の残したもの/.test(e.title()) && /バルド/.test(e.text()));
-  e.closeAll();
+  e.closeAll(); neutral(e); e.g.settle();
   check('背負い籠（30kg）・わずかな元手で始まる', S.cart.type === 'basket' && D.CARTS.basket.cap === 30 && S.gold === D.CONFIG.startGold && S.gold <= 60);
   check('春の1日目に始まり、最初の返済は春の終わり（30日後）', e.g.seasonOf(0).id === 'spring' && e.g.daysLeft() === 30 && e.g.owed() === D.CONFIG.loan.dues[0]);
   const seen2 = Object.keys(S.seen).filter((t) => S.seen[t] === 2);
@@ -186,7 +190,7 @@ function testWeight() {
   const dens = (g) => D.GOODS[g].base / D.GOODS[g].w;
   check('麦や塩は安くて重く、布や香辛料は高くて軽い', dens('grain') < dens('salt') && dens('salt') < dens('wool') && dens('wool') < dens('honey') && dens('honey') < dens('linen') && dens('linen') < dens('cloth') && dens('cloth') < dens('spice'));
   const dom = Object.keys(D.TOWNS).filter((t) => !D.TOWNS[t].abroad);
-  const spread = (g) => { const v = dom.filter((t) => !(D.TOWNS[t].ban || []).includes(g)).map((t) => D.TOWNS[t].prices[g] == null ? 1 : D.TOWNS[t].prices[g]); const src = dom.filter((t) => D.TOWNS[t].stock[g] != null).map((t) => D.TOWNS[t].prices[g]); return Math.max.apply(null, v) / Math.min.apply(null, src); };
+  const spread = (g) => { const v = dom.filter((t) => !(D.TOWNS[t].ban || []).includes(g)).map((t) => e.g.BASE[t][g]); const src = dom.filter((t) => D.TOWNS[t].stock[g] != null).map((t) => e.g.BASE[t][g]); return Math.max.apply(null, v) / Math.min.apply(null, src); };
   check('重くて安い品は、産地を離れると値が大きく上がる', ['grain', 'salt', 'wine', 'iron'].every((g) => spread(g) >= 2.4), ['grain', 'salt', 'wine', 'iron'].map((g) => D.GOODS[g].name + '×' + spread(g).toFixed(1)).join(' '));
   const lux = ['linen', 'cloth', 'spice'];
   check('軽くて高い品は、売値で見て産地の1〜3割増しまで', lux.every((g) => spread(g) * C.sellRate >= 1.0 && spread(g) * C.sellRate <= 1.4), lux.map((g) => D.GOODS[g].name + '×' + (spread(g) * C.sellRate).toFixed(2)).join(' '));
@@ -329,9 +333,9 @@ function testCalendar() {
   S.town = 'hashibami'; e.act('tab', { id: 'market' });
   check('市場の画面に季節と行事が出る', /春 1日目/.test(plain(e)) && /王都の春祭り/.test(plain(e)) && /あと17日/.test(plain(e)));
   const w0 = g.mult('oto', 'wine'); at(18); const w1 = g.mult('oto', 'wine'), k1 = g.mult('kawabe', 'wine');
-  check('春祭りのあいだ、王都でワインが高く売れる（よその町は変わらない）', g.eventMult('oto', 'wine', 18) === 1.6 && w1 > w0 * 1.5 && g.eventMult('kawabe', 'wine', 18) === 1 && k1 < w1, `倍率 ${w0.toFixed(2)} → ${w1.toFixed(2)}`);
+  check('春祭りのあいだ、王都でワインが高く売れる（よその町は変わらない）', g.eventMult('oto', 'wine', 18) === 2 && w1 > w0 * 1.5 && g.eventMult('kawabe', 'wine', 18) === 1 && k1 < w1, `倍率 ${w0.toFixed(2)} → ${w1.toFixed(2)}`);
   at(25); check('祭りが終わると元に戻る', g.eventMult('oto', 'wine', 25) === 1);
-  at(72); check('秋の大市では、カワベで何でも2割高い', g.eventMult('kawabe', 'iron', 72) === 1.2 && g.eventMult('kawabe', 'wool', 72) === 1.2);
+  at(72); check('秋の大市では、カワベで何でも高く売れる', g.eventMult('kawabe', 'iron', 72) === 1.25 && g.eventMult('kawabe', 'wool', 72) === 1.25 && g.eventMult('hataori', 'iron', 72) === 1);
   // 季節の変わり目のお知らせ
   S.time = 29 * 4; S.gold = 500; withRandom(0.5, () => e.act('rest'));
   check('季節が変わると知らせが出て、その日が返済日', /夏になった/.test(e.text()) && /返済日/.test(e.text()) && S.loan.n === 1); e.closeAll();
@@ -427,8 +431,14 @@ function testReveal() {
   e.press(0);
   check('すべてめくると、旅の決算が出る', /旅の決算/.test(e.text()) && /仕入れ値/.test(e.text()) && /道中の出費（2日）/.test(e.text()) && /(もうけ \+|損 )/.test(e.text()) && /市場へ/.test(e.modal.btns[0].label));
   check('噂を聞いていなかった品は、そう出る', /噂は聞いていなかった/.test(e.text()));
-  const best = S.stats.bestTrip; e.press(0); e.closeAll();
-  check('もうけが出た旅は、最高記録として残る', best > 0 && /最高の旅/.test((e.act('tab', { id: 'book' }), plain(e))));
+  e.press(0); e.closeAll();
+  check('着いただけ（まだ売っていない）では、最高の旅の記録はつかない', S.stats.bestTrip === 0);
+  S.cargo = { linen: { qty: 4, cost: 40, age: 0 } }; S.gold = 500;
+  const gs = S.gold; e.qty('sell', { g: 'linen' }); e.closeAll();
+  const made = S.gold - gs - 40;
+  withRandom(0.99, () => { e.go('r1'); }); e.closeAll();
+  check('実際に売ってもうけた商いは、町を出るときに最高記録として残る（来るまでの出費は引く）', made > 0 && S.stats.bestTrip > 0 && S.stats.bestTrip <= made && /最高の旅/.test((e.act('tab', { id: 'book' }), plain(e))) && S.diary.some((x) => /最高のもうけ/.test(x.t)), `売ったもうけ ${Math.round(made)}枚 → 記録 +${Math.round(S.stats.bestTrip)}枚`);
+  S.town = 'kawabe'; e.act('tab', { id: 'market' });
   // 小さな旅は短く
   S.cargo = { grain: { qty: 2, cost: 12, age: 0 } }; S.gold = 500;
   withRandom(0.99, () => { e.go('r1'); }); e.press(0);
@@ -454,27 +464,38 @@ function testLoan() {
   check('借りた金はツケになり、次の返済日にまとめて取り立てられる', S.debt === 60 && e.g.owed() === dues[1] - 100 + 60);
   const d0 = S.debt; e.rest(1);
   check('ツケには毎日利子がつく', S.debt > d0);
-  // 差し押さえ：店 → 荷車 → 荷
+  // 足りないとき：①荷をその町の値で必要なぶんだけ売る ②倉庫の荷 ③店の売上金と在庫 ④店 ⑤荷車 ⑥破産
   e = fresh(); S = e.g.state; knowAll(e);
   S.cart = { type: 'donkey', hp: 100 }; S.shop = { town: 'kawabe', lv: 1, stock: {}, till: 0 }; S.guards = 0;
   S.cargo = { linen: { qty: 10, cost: 350, age: 0 } };
-  S.gold = e.g.dailyCost().total * 30 + 10; to30(e);
-  check('払えないと、まず店を差し押さえられる', S.shop === null && S.cart.type === 'donkey' && S.loan.n === 1 && !S.dead);
-  check('取りすぎたぶんは返ってくる', S.gold > 0);
-  e.closeAll(); S.gold = e.g.dailyCost().total * 30; to30(e);
-  check('次は荷車を差し押さえられ、背負い籠に戻る', S.cart.type === 'basket' && S.loan.n === 2 && !S.dead && e.g.cargoWeight() <= 30); e.closeAll();
-  S.cargo = { spice: { qty: 5, cost: 800, age: 0 } }; S.gold = e.g.dailyCost().total * 30 + 50; to30(e);
-  check('次は荷を取り上げられる', e.g.cargoCount() === 0 && S.loan.n === 3 && !S.dead); e.closeAll();
+  S.time = 26 * 4; S.gold = e.g.dailyCost().total * 4 + 10; S.drift.hashibami.linen = 0; S.market.hashibami.linen = 0;
+  withRandom(0.5, () => e.act('rest'));
+  check('返済日の3日前に足りないと、何を売られるかの見込みが知らされる', /返済日まで、あと3日/.test(e.text()) && /まず荷を売られる/.test(e.text()) && /亜麻布/.test(e.text()) && e.g.forecast().short > 0 && !e.g.forecast().shop && !e.g.forecast().dead, e.g.forecastText().replace(/<[^>]+>/g, ''));
+  e.closeAll(); to30(e);
+  check('払えないと、まず荷を、その町の値で必要なぶんだけ売られる', !!S.cargo.linen && S.cargo.linen.qty === 9 && S.shop !== null && S.cart.type === 'donkey' && S.loan.n === 1 && !S.dead && /荷をハシバミ村の値で売られた/.test(e.text()), `亜麻布 残り${S.cargo.linen ? S.cargo.linen.qty : 0}反`);
+  check('売りすぎたぶんは手元に返ってくる', S.gold > 0 && S.gold < 60, `${S.gold}枚`);
+  e.closeAll(); S.cargo = {}; S.store = { kawabe: { grain: { qty: 30, cost: 150, age: 0 } } }; S.gold = e.g.dailyCost().total * 30; to30(e);
+  check('荷がなければ、次は倉庫の荷を処分される（店と荷車は残る）', Object.keys(S.store).length === 0 && S.shop !== null && S.cart.type === 'donkey' && S.loan.n === 2 && !S.dead && S.gold === Math.floor(30 * 10 * 0.6) - dues[1], `${S.gold}枚`); e.closeAll();
+  S.shop.till = 100; S.shop.stock = {}; S.gold = e.g.dailyCost().total * 30; to30(e);
+  check('次は店の売上金と在庫、それでも足りなければ店を差し押さえられる（荷車は残る）', S.shop === null && S.cart.type === 'donkey' && S.loan.n === 3 && !S.dead && S.told.seized === 1 && S.gold === 100 + Math.floor(D0.CONFIG.shop[1].cost * 0.6) - dues[2], `${S.gold}枚`); e.closeAll();
+  S.gold = e.g.dailyCost().total * 30 + dues[3] - 100; to30(e);
+  check('最後に荷車を差し押さえられ、背負い籠に戻る', S.cart.type === 'basket' && S.loan.n === 4 && !S.dead && S.gold === Math.floor(D0.CARTS.donkey.price * 0.5) - 100, `${S.gold}枚`); e.closeAll();
   S.gold = 0; to30(e);
   check('何も残らなければ破産する', S.dead === true && /💀/.test(e.title()) && /父と同じ道/.test(e.text()));
   check('破産するとセーブが消える', !(KEY in e.store));
   const rec = JSON.parse(e.store[REC] || '[]');
-  check('破産しても、商人録には記録が残る', rec.length === 1 && rec[0].result === '破産' && rec[0].paid === 3 && rec[0].day === 121, rec[0] ? `${rec[0].day}日目・返済${rec[0].paid}回・${rec[0].cart}` : '');
+  check('破産しても、商人録には記録が残る（何代目・誰・能力・旅日記つき）', rec.length === 1 && rec[0].result === '破産' && rec[0].paid === 4 && rec[0].day === 151 && rec[0].gen === 1 && !!rec[0].who && rec[0].st.length === 5 && rec[0].diary.some((x) => /破産した/.test(x)), rec[0] ? `${rec[0].day}日目・返済${rec[0].paid}回・${rec[0].cart}・${rec[0].who}` : '');
   e.press(0); e.drain();
   const S2 = e.g.state;
   check('破産後は完全に最初から（導入からやり直し）', S2.time === 0 && S2.gold === D0.CONFIG.startGold && S2.cart.type === 'basket' && S2.loan.n === 0 && /父の残したもの/.test(e.title()));
+  e.press(0);
+  check('次は2代目の商人を選ぶ', /2代目の商人を選ぶ/.test(e.title()));
   e.closeAll(); e.act('tab', { id: 'book' });
-  check('新しく始めても、帳簿に前の代の記録が出る', /商人録/.test(plain(e)) && /破産/.test(plain(e)) && /返済3回/.test(plain(e)));
+  check('新しく始めても、帳簿に前の代の記録が出る', /商人録/.test(plain(e)) && /破産/.test(plain(e)) && /返済4回/.test(plain(e)) && /1代目/.test(plain(e)) && e.g.state.me.gen === 2);
+  // 禁制品は、売れない町では半値で引き取られる
+  e = fresh(); S = e.g.state; knowAll(e); S.town = 'oto'; S.cargo = { tobacco: { qty: 4, cost: 400, age: 0 } }; S.gold = e.g.dailyCost().total * 30; to30(e);
+  check('王都で禁制品しか持っていなければ、半値で引き取られる', S.loan.n === 1 && !S.dead && !!S.cargo.tobacco && S.cargo.tobacco.qty === 3 && S.gold === 75 - dues[0], `${S.gold}枚`); e.closeAll();
+  check('借りられる上限は、返済が重くなるほど上がる', e.g.tabLimit() === Math.round(D0.CONFIG.tabLimit + dues[1] * D0.CONFIG.tabDueRate) && (S.loan.n = 5, e.g.tabLimit()) > 600);
   // 完済
   e = fresh(); S = e.g.state; S.loan.n = dues.length - 1; S.loan.cycle = dues.length - 1; S.time = (dues.length - 1) * 30 * 4; S.gold = 9000; to30(e);
   check('最後の返済を終えると完済の場面が出て、商人録に残る', S.loan.done === true && S.told.free === 1 && JSON.parse(e.store[REC])[0].result === '完済'); e.closeAll();
@@ -572,7 +593,10 @@ function testRise() {
   knowAll(e);
   check('最初の呼び名は「籠の兄ちゃん」', g.callName('hashibami') === '籠の兄ちゃん');
   S.town = 'kawabe'; S.gold = 9000;
-  for (const id of ['handcart', 'donkey', 'horse']) { e.act('buyCart', { id }); e.press(1); e.closeAll(); }
+  for (const id of ['handcart', 'donkey']) { e.act('buyCart', { id }); e.press(1); e.closeAll(); }
+  e.act('buyCart', { id: 'horse' }); e.act('tab', { id: 'town' });
+  check('馬車はカワベの車屋では買えない（王都でしか買えない）', S.cart.type === 'donkey' && !e.open() && /この町には無い/.test(plain(e)));
+  S.town = 'oto'; e.act('buyCart', { id: 'horse' }); e.press(1); e.closeAll(); S.town = 'kawabe';
   check('荷車を順に買い替えられ、そのたびに場面が出る', S.cart.type === 'horse' && S.told.handcart && S.told.donkey && S.told.horse);
   check('荷車を持つと呼び名が変わり、評判が上がるとまた変わる', g.callName('kawabe') === '車の兄ちゃん' && (S.rep.kawabe = 10, g.callName('kawabe') === '行商さん') && (S.rep.kawabe = 25, g.callName('kawabe') === 'おなじみさん') && (S.rep.kawabe = 45, /旦那/.test(g.callName('kawabe'))));
   S.rep.kawabe = 0;
@@ -647,7 +671,7 @@ function testAbroad() {
   check('山越えの密輸路は関税がないが、遠くて、とても危ない', g.tariff('r14b') === 0 && g.routeInfo('r14b').days > g.routeInfo('r14').days && g.routeInfo('r14b').shown === 3);
   const g0 = S.gold, days = g.routeInfo('r14').days; withRandom(0.99, () => e.travel('r14'));
   check('国境で関税を払って、隣国の町に着く', S.town === 'karune' && S.gold === g0 - tax - g.dailyCost().total * days && S.told.karune === 1); e.closeAll();
-  check('隣国では鉄が国内よりずっと高く売れ、砂糖と香辛料が安い', D.TOWNS.karune.prices.iron >= 2 && D.TOWNS.mirza.prices.iron > D.TOWNS.oto.prices.iron * 1.3 && D.TOWNS.mirza.prices.sugar <= 0.5 && D.TOWNS.oto.prices.sugar >= 1.5 && D.TOWNS.mirza.prices.spice < D.TOWNS.shiokaze.prices.spice);
+  check('隣国では鉄が国内よりずっと高く売れ、砂糖と香辛料が安い', g.BASE.karune.iron >= 2 && g.BASE.mirza.iron > g.BASE.oto.iron * 1.3 && g.BASE.mirza.sugar <= 0.5 && g.BASE.oto.sugar >= 1.5 && g.BASE.mirza.spice < g.BASE.shiokaze.spice, `鉄 王都×${g.BASE.oto.iron} カルネ×${g.BASE.karune.iron} ミルザ×${g.BASE.mirza.iron} ／ 砂糖 王都×${g.BASE.oto.sugar}`);
   check('隣国の町にも顔役がいて、その先に都がある', D.TOWNS.karune.who.name === 'ハディ' && g.neighbors('karune').includes('mirza'));
   // 通行手形
   S.rep.oto = C.abroad.passRep; withRandom(0.5, () => e.act('rest'));
@@ -672,7 +696,201 @@ function testAbroad() {
   check('帳簿に、隣国との商いを許されたことが出る', /隣国との商いを許された/.test(plain(e)));
 }
 
-// ---------- 13. バランス：通しプレイ ----------
+// ---------- 13. 第5版：商人の能力・難しさ・旅日記・引き継ぎ ----------
+function testMerchant() {
+  console.log('■ 商人の能力・難しさ・旅日記・前の版からの引き継ぎ');
+  let e = boot(), g = e.g, S = g.state;
+  const D = e.D, C = D.CONFIG, keys = Object.keys(D.STATS);
+  check('商人の候補は3人。能力は5つ、どれも1〜5で、合計は誰でも15', S.cands.length === 3 && keys.length === 5 && S.cands.every((c) => keys.every((k) => c.st[k] >= 1 && c.st[k] <= 5) && keys.reduce((a, k) => a + c.st[k], 0) === 15) && new Set(S.cands.map((c) => c.name)).size === 3,
+    S.cands.map((c) => c.nick + c.name + '(' + keys.map((k) => c.st[k]).join('') + ')').join(' / '));
+  const many = withRandom(seeded(77), () => { const a = []; for (let i = 0; i < 200; i++) a.push(g.genCand([])); return a; });
+  check('能力の配分は毎回ちがい、いちばん高い能力からあだ名がつく', new Set(many.map((c) => keys.map((k) => c.st[k]).join(''))).size > 30 && many.every((c) => keys.reduce((a, k) => a + c.st[k], 0) === 15 && c.st[c.top] === Math.max.apply(null, keys.map((k) => c.st[k])) && c.nick === D.STATS[c.top].nick));
+  e.press(0);
+  check('導入のあと、1代目の商人を選ぶ', /1代目の商人を選ぶ/.test(e.title()) && e.modal.btns.length === 3);
+  const c1 = S.cands[1]; e.press(1);
+  check('選んだ商人で始まり、旅日記の1行目が書かれる', !!S.me && S.me.name === c1.name && S.me.gen === 1 && S.cands === null && S.diary.length === 1 && /籠ひとつで/.test(S.diary[0].t));
+  check('次に、難しさを選ぶ（ふつう・やさしい・きびしい）', /難しさを選ぶ/.test(e.title()) && e.modal.btns.length === 3 && /ふつう/.test(e.modal.btns[0].label));
+  e.pressLabel(/やさしい/);
+  const pe = g.banditChance(1, false), de = [g.dueOf(0), g.dueOf(7)];
+  S.diff = 'normal'; const pn = g.banditChance(1, false), dn = [g.dueOf(0), g.dueOf(7)];
+  S.diff = 'hard'; const ph = g.banditChance(1, false), dh = [g.dueOf(0), g.dueOf(7)];
+  check('難しさで、返済額と山賊の多さが変わる', de[0] === 40 && dn[0] === C.loan.dues[0] && dh[0] === 70 && de[1] < dn[1] && dn[1] < dh[1] && pe < pn && pn < ph, `最初の返済 ${de[0]}／${dn[0]}／${dh[0]}枚・最後 ${de[1]}／${dn[1]}／${dh[1]}枚`);
+  S.diff = 'easy'; e.closeAll(); g.settle();
+  const e2 = boot(Object.assign({}, e.store));
+  check('商人と難しさは保存され、続きから再開できる', !e2.open() && e2.g.state.me.name === c1.name && e2.g.state.diff === 'easy' && e2.g.owed() === 40);
+  const e3 = boot(Object.assign({}, boot().store));
+  check('商人を選ぶ前に閉じても、次に開けば導入からやり直せる', e3.g.state.me === null && /父の残したもの/.test(e3.title()));
+  e.act('tab', { id: 'book' });
+  check('帳簿に、商人の能力・難しさ・旅日記が出る', /1代目/.test(plain(e)) && keys.every((k) => plain(e).includes(D.STATS[k].name)) && /難しさ：やさしい/.test(plain(e)) && /旅日記（1行）/.test(plain(e)));
+
+  // 能力の効き目（基準は3）
+  e = fresh(); g = e.g; S = g.state; knowAll(e);
+  const set = (k, v) => { S.me.st[k] = v; };
+  const err3 = g.rumorErr('hashibami', 'kawabe'); set('eye', 5); const err5 = g.rumorErr('hashibami', 'kawabe'); set('eye', 1); const err1 = g.rumorErr('hashibami', 'kawabe'); set('eye', 3);
+  check('目利き：値の噂の幅が狭く（低いと広く）なる', err3 === C.rumorErr[0] && Math.abs(err5 - 0.12) < 1e-9 && Math.abs(err1 - 0.18) < 1e-9, `±${err1 * 100}% → ±${err3 * 100}% → ±${err5 * 100}%`);
+  S.drift.hashibami.spice = 0; S.drift.hashibami.wool = 0;
+  const b3 = g.buyNow('hashibami', 'wool'), s3 = g.sellNow('hashibami', 'spice'); set('talk', 5); const b5 = g.buyNow('hashibami', 'wool'), s5 = g.sellNow('hashibami', 'spice'); set('talk', 1); const s1 = g.sellNow('hashibami', 'spice'), b1 = g.buyNow('hashibami', 'wool');
+  check('話術：安く買え、高く売れる（低いと逆）', b5 <= b3 && b3 <= b1 && b5 < b1 && s1 < s3 && s3 < s5 && Math.abs(g.edge('hashibami') + 0.04) < 1e-9, `香辛料の売値 ${s1}→${s3}→${s5}枚`);
+  set('talk', 5); S.buddy = 'ren'; S.patrons = [{ t: 'kawabe', g: 'iron', n: 4, n0: 4, lv: 0, due: 99, streak: C.patronTrust, miss: 0 }];
+  check('話術と得意先の優遇を合わせても、値段の有利さは1割まで', g.eff('talk') === 7 && g.edge('kawabe') === C.stat.edgeMax);
+  set('talk', 3); S.buddy = null; S.patrons = [];
+  set('body', 5); const cap5 = g.capNow(); set('body', 1); const cap1 = g.capNow(); S.cart = { type: 'handcart', hp: 100 }; const capCart = g.capNow(); S.cart = { type: 'basket', hp: 100 }; set('body', 3);
+  check('体力：背負い籠に入る重さが変わる（荷車は変わらない）', cap5 === 36 && cap1 === 24 && capCart === D.CARTS.handcart.cap && g.capNow() === 30);
+  const p3 = g.selfPower(), f3 = g.fleeChance(); set('arm', 5); const p5 = g.selfPower(), f5 = g.fleeChance(); set('arm', 1); const p1 = g.selfPower(); set('arm', 3);
+  check('腕っぷし：自分の戦う力と、逃げ切る確率が変わる', p3 === C.selfPower && p5 === C.selfPower + 4 && p1 === 1 && Math.abs(f5 - f3 - 0.08) < 1e-9);
+  set('sense', 5); S.town = 'kawabe'; S.gold = 300; S.rain = false; S.cargo = { linen: { qty: 5, cost: 200, age: 0 } };
+  // 気づく確率は、ふつう6割 → 勘5で7割6分。乱数 0.7 は、ふつうなら気づけない
+  withRandom(seq([0.99, 0.99, 0, 0.7, 0.99, 0.99, 0.5]), () => { e.go('r8'); });
+  check('勘：山賊に先に気づきやすく、身をひそめるのがうまい', C.scout < 0.7 && /道に足跡/.test(e.title()) && /成功 約80%/.test(e.modal.innerHTML) && /勘/.test(e.text()));
+  withRandom(0.0, () => { e.choose(/身をひそめ/); }); withRandom(0.99, () => e.closeAll()); set('sense', 3);
+  // 使うほど伸びる（1段階だけ）
+  S.town = 'hashibami'; S.cargo = {}; S.me.use.body = C.grow.body - 2; S.me.up = {};
+  withRandom(0.99, () => e.travel('r1'));
+  check('道中を歩いた日数を重ねると、体力が1段階だけ伸びる', S.me.up.body === true && g.eff('body') === 4 && g.capNow() === 33 && S.diary.some((x) => /体力が上がった/.test(x.t)) && /体力が上がった/.test(e.title()));
+  e.closeAll(); withRandom(0.99, () => e.travel('r1')); e.closeAll(); withRandom(0.99, () => e.travel('r1')); e.closeAll();
+  check('2回は伸びない', g.eff('body') === 4);
+
+  // 前の版（v4）のセーブを引き継ぐ
+  const o = JSON.parse(fresh().store[KEY]);
+  o.v = 4;
+  for (const k of ['me', 'cands', 'diff', 'buddy', 'store', 'boss', 'bossNext', 'bossN', 'safe', 'diary', 'visit', 'warned']) delete o[k];
+  delete o.stats.bosses;
+  o.gold = 777; o.time = 61 * 4; o.cart = { type: 'handcart', hp: 80 }; o.cargo = { grain: { qty: 3, cost: 18, age: 0 } }; o.loan.n = 2; o.loan.cycle = 2; o.rep.kawabe = 12;
+  o.patrons = [{ t: 'kawabe', g: 'iron', n: 4, due: 70, streak: 1, miss: 0 }];
+  const old = JSON.stringify(o), m = boot({ [OLD]: old }), M = m.g.state;
+  check('前の版（v4）のセーブがあれば、お金・荷・荷車・借金・評判を引き継ぐ', M.v === 5 && M.gold === 777 && M.time === 61 * 4 && M.cart.type === 'handcart' && M.cart.hp === 80 && M.cargo.grain.qty === 3 && M.loan.n === 2 && M.rep.kawabe === 12 && m.g.owed() === C.loan.dues[2]);
+  check('引き継いだ商人の能力は、すべて「ふつう（3）」。難しさも「ふつう」', !!M.me && keys.every((k) => M.me.st[k] === 3 && m.g.eff(k) === 3) && M.diff === 'normal' && /帳簿を引き継いだ/.test(m.title()));
+  check('引き継ぎで、この版の新しい項目（倉庫・旅日記・得意先の段階など）が補われる', M.buddy === null && Object.keys(M.store).length === 0 && M.boss === null && M.bossNext === 71 && M.diary.length === 1 && M.patrons[0].lv === 0 && M.patrons[0].n0 === 4 && M.stats.bosses === 0);
+  check('この版の保存名は shokai-save-v5。前の版のセーブは消さずに残す', m.g.SAVE_KEY === 'shokai-save-v5' && m.g.OLD_KEY === OLD && m.store[OLD] === old && JSON.parse(m.store[KEY]).v === 5 && JSON.parse(m.store[KEY]).gold === 777);
+  m.closeAll();
+  for (const t of ['market', 'map', 'town', 'book']) { m.act('tab', { id: t }); if (html(m).length < 200) fails++; }
+  withRandom(0.5, () => m.rest(2));
+  check('引き継いだあとも、そのまま遊べる', m.days() === 63 && !M.dead && html(m).length > 200);
+  const both = boot({ [KEY]: m.store[KEY], [OLD]: JSON.stringify(Object.assign({}, o, { gold: 5 })) });
+  check('この版のセーブがあるときは、前の版のセーブを読まない', both.g.state.gold !== 5 && both.g.state.time === M.time && !both.open());
+}
+
+// ---------- 14. 第5版：道連れ・倉庫・保険・山賊の頭・見回り・夜・遠出 ----------
+function testV5() {
+  console.log('■ 道連れ・倉庫・保険・山賊の頭・街道の見回り・夜・遠出');
+  let e = fresh(), g = e.g, S = g.state;
+  const D = e.D, C = D.CONFIG;
+  const mk = (town, opt) => { e = fresh(); g = e.g; S = g.state; knowAll(e); S.town = town; S.gold = 300; S.rain = false; Object.assign(S, opt || {}); };
+  // 道連れ
+  mk('mizunara', { gold: 100 }); e.act('tab', { id: 'town' });
+  check('町ごとに、誘える道連れがいる', /旅の道連れ/.test(plain(e)) && /ヨナ/.test(plain(e)) && Object.keys(D.COMPANIONS).length === 5 && new Set(Object.values(D.COMPANIONS).map((c) => c.stat)).size === 5 && Object.values(D.COMPANIONS).every((c) => D.TOWNS[c.town] && D.STATS[c.stat]));
+  e.act('buddyHire', { k: 'borg' });
+  check('よその町の道連れは、ここでは誘えない', !e.open() && S.buddy === null);
+  e.act('buddyHire', { k: 'yona' }); e.press(1);
+  check('手付けを払って誘うと、足りない能力を補ってくれる（日給がかかる）', S.buddy === 'yona' && S.gold === 100 - C.buddyHire && g.eff('sense') === 3 + C.buddyBonus && g.dailyCost().buddy === C.buddyWage && /旅の道連れ/.test(e.title()) && S.diary.some((x) => /ヨナ/.test(x.t)));
+  e.closeAll(); S.town = 'iwaya'; S.gold = 100; e.act('buddyHire', { k: 'borg' }); e.press(1); e.closeAll();
+  check('連れて歩けるのは1人（誘い直すと入れ替わる）', S.buddy === 'borg' && g.eff('sense') === 3 && g.eff('body') === 5 && g.capNow() === 36);
+  S.gold = 0; withRandom(0.5, () => e.act('rest'));
+  check('給金が払えないと、道連れは去る', S.buddy === null && /去っていった/.test(e.text()) && g.capNow() === 30); e.closeAll();
+
+  // 倉庫
+  mk('kawabe', { gold: 500, cart: { type: 'horse', hp: 100 }, cargo: { grain: { qty: 10, cost: 60, age: 0 } } }); e.act('tab', { id: 'town' });
+  check('大きな町には貸し倉庫がある（村には無い）', /貸し倉庫/.test(plain(e)) && D.TOWNS.kawabe.has.store && D.TOWNS.oto.has.store && !D.TOWNS.hashibami.has.store);
+  e.qty('storePut', { g: 'grain' }, 6);
+  check('荷を預けられる（仕入れ値も一緒に移る）。初めてなら場面が出る', S.store.kawabe.grain.qty === 6 && S.cargo.grain.qty === 4 && Math.abs(S.store.kawabe.grain.cost - 36) < 1e-6 && Math.abs(S.cargo.grain.cost - 24) < 1e-6 && S.told.store === 1 && g.storeWeight('kawabe') === 60); e.closeAll();
+  const gr = S.gold; withRandom(0.5, () => e.rest(1));
+  check('荷を預けている町ごとに、1日の倉庫代がかかる', g.dailyCost().store === C.store.rent && gr - S.gold === C.living + D.CARTS.horse.feed + C.store.rent);
+  e.qty('storeTake', { g: 'grain' }, 2);
+  check('預けた荷を出せる', S.store.kawabe.grain.qty === 4 && S.cargo.grain.qty === 6);
+  S.cargo.iron = { qty: 30, cost: 900, age: 0 }; e.qty('storePut', { g: 'iron' });
+  check('1つの町に預けられるのは500kgまで', S.store.kawabe.iron.qty === 23 && g.storeWeight('kawabe') === 500 && S.cargo.iron.qty === 7);
+  S.town = 'hataori'; e.act('tab', { id: 'town' });
+  check('よその町からは、預けた町と重さだけが見える', /ほかの町の倉庫：カワベの町（500kg）/.test(plain(e)));
+
+  // 荷の保険
+  mk('hataori', { cart: { type: 'donkey', hp: 100 }, cargo: { spice: { qty: 6, cost: 900, age: 0 } } });
+  e.act('tab', { id: 'map' }); e.act('dest', { id: 'shiokaze' });
+  check('金貸しのいる町では、出発前に荷へ保険をかけられる', /荷に保険をかける（掛け金 54枚）/.test(plain(e)));
+  e.act('insure');
+  withRandom(seq([0.99, 0.99, 0, 0.99, 0.99, 0.99, 0.5]), () => e.travel('r11', (txt) => (/だ！/.test(txt) ? /荷の/ : null)));
+  const cost3 = g.dailyCost().total * 3;
+  check('山賊に荷を渡しても、失った荷の仕入れ値の6割が保険で戻る', S.town === 'shiokaze' && S.cargo.spice.qty === 4 && S.gold === 300 - 54 - cost3 + 180 && S.diary.some((x) => /保険で180枚/.test(x.t)), `${S.gold}枚`);
+  e.closeAll();
+  mk('hashibami', { cargo: { grain: { qty: 3, cost: 18, age: 0 } } }); e.act('tab', { id: 'map' }); e.act('dest', { id: 'kawabe' }); e.act('insure');
+  const g0 = S.gold; withRandom(0.99, () => e.travel('r1'));
+  check('金貸しのいない村では、保険をかけられない', !/保険をかける/.test(plain(e)) && S.gold === g0 - C.living * 2); e.closeAll();
+
+  // 山賊の頭
+  const bossSet = () => { mk('kawabe', { cart: { type: 'donkey', hp: 100 }, guards: 3, cargo: { linen: { qty: 5, cost: 200, age: 0 } } }); S.boss = { name: '赤髭のガロ', rid: 'r8b', power: 30, bounty: 400 }; };
+  bossSet();
+  const bi = g.routeInfo('r8b');
+  e.act('tab', { id: 'map' }); e.act('dest', { id: 'hataori' });
+  check('頭の居座る道は、かならず出くわす（旅じたくに手配書の中身が出る）', bi.risk === 1 && bi.boss.name === '赤髭のガロ' && g.dangerOf('r8b') === 3 && /山賊の頭が待ちかまえている/.test(plain(e)) && /懸賞金 400枚/.test(plain(e)) && g.routeInfo('r8').boss === null);
+  withRandom(seq([0.99, 0.99]), () => { e.go('r8b'); });
+  check('頭に出くわすと、戦う・引き返す・通行料・すり抜けるを選ぶ', /山賊の頭「赤髭のガロ」/.test(e.title()) && e.modal.btns.length === 4 && /引き返す/.test(e.modal.innerHTML) && /通行料を払う（115枚）/.test(e.modal.innerHTML) && /すり抜ける/.test(e.modal.innerHTML));
+  const d0 = e.days(); withRandom(seq([0.0]), () => { e.choose(/戦う/); });
+  check('頭を倒すと、懸賞金・評判・場面。その道は40日のあいだ安全になる', /頭を倒した/.test(e.title()) && S.boss === null && S.gold === 300 + 400 && S.stats.bosses === 1 && S.told.boss === 1 && S.safe.r8b === d0 + C.boss.safeDays && S.bossNext > d0 + 25 && S.diary.some((x) => /赤髭のガロ/.test(x.t)));
+  withRandom(0.99, () => e.closeAll()); S.town = 'kawabe';
+  check('頭を倒した道は、危険度が2下がる', S.town === 'kawabe' && g.dangerOf('r8b') === 1 && g.routeInfo('r8b').safe === true && g.routeInfo('r8b').risk < 0.3);
+  bossSet(); withRandom(seq([0.99, 0.99]), () => { e.go('r8b'); });
+  const d1 = e.days(); withRandom(0.99, () => { e.choose(/引き返す/); e.closeAll(); });
+  check('引き返せば、1日を無駄にするだけで荷は無事', S.town === 'kawabe' && e.days() === d1 + 1 && S.cargo.linen.qty === 5 && S.boss !== null && S.gold === 300 - g.dailyCost().total);
+  bossSet(); withRandom(seq([0.99, 0.99]), () => { e.go('r8b'); });
+  withRandom(0.99, () => { e.choose(/通行料/); e.closeAll(); });
+  check('通行料を払えば、通してもらえる（頭は居座ったまま）', S.town === 'hataori' && S.cargo.linen.qty === 5 && S.boss !== null && S.gold === 300 - 115 - g.dailyCost().total * 2);
+  bossSet(); S.guards = 0; withRandom(seq([0.99, 0.99]), () => { e.go('r8b'); });
+  withRandom(seq([0.99]), () => { e.choose(/戦う/); });
+  check('頭に負けると、荷と金を奪われる', /負けた/.test(e.title()) && S.cargo.linen.qty === 2 && S.gold === 300 - Math.floor(300 * C.boss.loseGold) && S.stats.robbed === 1 && S.boss !== null); withRandom(0.99, () => e.closeAll());
+  e = fresh(); g = e.g; S = g.state;
+  check('はじめの季節は、安全な街道に山賊が出ない', g.banditChance(0, false) === 0 && g.banditChance(1, false) > 0 && (S.time = C.safeDays * 4, g.banditChance(0, false)) > 0);
+  S.time = 0; withRandom(seeded(5), () => e.rest(C.boss.first + 1));
+  e.act('tab', { id: 'market' });
+  check('25日目に、最初の頭の手配書が出る（近道か山道に居座る）', !!S.boss && D.BOSS_ROADS.includes(S.boss.rid) && D.ROADS[S.boss.rid].type !== 'road' && S.boss.name === D.BOSSES[0] && /手配書：山賊の頭/.test(plain(e)), S.boss ? `${S.boss.name}・${S.boss.rid}・力${S.boss.power}・懸賞金${S.boss.bounty}枚` : '');
+
+  // 街道の見回り
+  mk('kawabe', { gold: 500, cargo: { tobacco: { qty: 5, cost: 450, age: 0 } } });
+  check('禁制品を積んで街道を行くと、見回りにあらためられることがある（山道と近道にはいない）', g.routeInfo('r8').patrol === true && g.routeInfo('r8b').patrol === false && g.routeInfo('r6b').patrol === false && C.patrol.chance > 0);
+  withRandom(seq([0.99, 0.99, 0, 0.99, 0.99]), () => { e.go('r8'); });
+  check('見回りに呼び止められると、そのまま通るか、袖の下かを選ぶ', /街道の見回り/.test(e.title()) && /そのまま通る/.test(e.modal.innerHTML) && /袖の下を渡す/.test(e.modal.innerHTML));
+  withRandom(seq([0.1]), () => { e.choose(/そのまま通る/); });
+  check('見つかると、没収と罰金', /見つかった/.test(e.title()) && !S.cargo.tobacco && S.gold === 500 - Math.ceil(750 * C.fineRate)); withRandom(0.99, () => e.closeAll());
+  mk('kawabe', { cargo: { linen: { qty: 5, cost: 200, age: 0 } } });
+  check('禁制品がなければ、見回りは関係ない', g.routeInfo('r8').patrol === false);
+
+  // 夜
+  e = fresh(); g = e.g; S = g.state; S.gold = 500; S.time = 2;
+  e.qty('buy', { g: 'grain' }, 1);
+  check('夕方に売り買いを始めると、夜になる', S.time === 3 && g.isNight() && S.cargo.grain.qty === 1);
+  e.qty('buy', { g: 'grain' }, 1);
+  check('始めた売り買いは、同じ刻のうちは夜になっても続けられる', S.cargo.grain.qty === 2 && S.time === 3);
+  const gn = S.gold; e.act('go', { r: 'r1' }); e.act('rumor'); e.act('work');
+  check('夜は出発できず、酒場も日雇いも閉まっている', !g.travel && S.town === 'hashibami' && S.gold === gn && S.time === 3 && !e.open());
+  S.tradedAt = -1; e.act('buy', { g: 'grain' }); e.act('sell', { g: 'grain' }); e.act('tab', { id: 'market' });
+  check('夜になってからは、市場で売り買いできない', !e.open() && /夜になった/.test(plain(e)) && /朝まで休む/.test(plain(e)));
+  withRandom(0.5, () => e.act('rest')); e.closeAll();
+  check('朝まで休むと、次の日の朝になる', S.time === 4 && !g.isNight());
+  S.time = 5; withRandom(0.99, () => e.travel('r1')); e.closeAll();
+  check('旅は日数ちょうど。昼に出れば、昼に着く', S.town === 'kawabe' && S.time === 5 + 2 * 4);
+
+  // 遠出：遠くへ運ぶほど高く売れる
+  mk('kawabe');
+  const B = g.BASE, bulk = ['grain', 'salt', 'wine', 'iron'];
+  check('重くて安い品は、産地から遠い町ほど高い', B.hashibami.grain < B.kawabe.grain && B.kawabe.grain < B.hataori.grain && B.hataori.grain < B.shiokaze.grain && B.shiokaze.grain >= 2, `麦 ハシバミ×${B.hashibami.grain} カワベ×${B.kawabe.grain} ハタオリ×${B.hataori.grain} シオカゼ×${B.shiokaze.grain}`);
+  const home = Object.keys(D.TOWNS).filter((t) => !D.TOWNS[t].abroad);
+  const bestOf = (gid) => home.filter((t) => !g.banned(t, gid)).sort((a, b) => B[b][gid] - B[a][gid])[0];
+  const srcDist = (t, gid) => Math.min.apply(null, home.filter((p) => g.sellsHere(p, gid)).map((p) => g.PD[t][p]));
+  check('どの重い品も、いちばん高く売れる町は産地から5日以上離れている', bulk.every((gid) => srcDist(bestOf(gid), gid) >= 5), bulk.map((gid) => `${D.GOODS[gid].name}→${D.TOWNS[bestOf(gid)].name}（${srcDist(bestOf(gid), gid)}日・×${B[bestOf(gid)][gid]}）`).join(' '));
+  check('産地のとなり町は市場が薄く、売りこむと値がすぐ崩れる', g.nearDepth('kawabe', 'grain') === 0.35 && g.nearDepth('hataori', 'grain') === 1 && g.nearDepth('hashibami', 'grain') === 1 && g.step('kawabe', 'grain') > g.step('hataori', 'grain') * 3);
+  check('産地でない町の値段は、データに書かず道のりから決まる', home.every((t) => Object.keys(D.TOWNS[t].prices).every((gid) => D.TOWNS[t].stock[gid] != null)));
+  // 遠方の頼みは運び賃が倍
+  let farO = null, nearO = null, where = null;
+  for (let k = 1; k <= 80 && !(farO && nearO); k++) for (const t of ['oto', 'shiokaze', 'kawabe']) { S.offers = {}; for (const o of withRandom(seeded(k), () => g.offersOf(t))) { if (o.far && !farO) { farO = o; where = t; } if (!o.far && !nearO) nearO = Object.assign({ t }, o); } }
+  const fee = (o, t, mult) => Math.round(o.n * D.GOODS[o.g].base * 0.8 + o.n * D.GOODS[o.g].w * C.orderFee * mult * (1 + srcDist(t, o.g)));
+  check('産地まで5日以上の「遠方の頼み」は、運び賃が2倍', !!farO && !!nearO && srcDist(where, farO.g) >= C.orderFarDays && farO.reward === fee(farO, where, C.orderFarMult) && srcDist(nearO.t, nearO.g) < C.orderFarDays && nearO.reward === fee(nearO, nearO.t, 1),
+    farO ? `${D.TOWNS[where].name}へ${D.GOODS[farO.g].name}${farO.n}${D.GOODS[farO.g].unit}（産地まで${srcDist(where, farO.g)}日）報酬 ${farO.reward}枚` : '');
+  // 得意先の注文が大きくなる
+  S.town = 'kawabe'; S.patrons = [{ t: 'kawabe', g: 'iron', n: 4, n0: 4, lv: 0, due: e.days() + 20, streak: C.patronGrow - 1, miss: 0 }]; S.cargo = { iron: { qty: 20, cost: 700, age: 0 } };
+  withRandom(seeded(3), () => e.act('supply', { i: '0' }));
+  check('得意先との約束を3回つづけて守ると、注文が大きくなる', S.patrons[0].lv === 1 && S.patrons[0].n === 6 && S.patrons[0].streak === C.patronGrow && /注文が大きくなった/.test(e.text()) && g.patronPay(S.patrons[0]) === Math.round(6 * D.GOODS.iron.base * C.patronPay)); e.closeAll();
+  check('店は、自分で卸すより高く売ってくれる', C.shopPrice > C.sellRate && C.shop[2].units > C.shop[1].units);
+}
+
+// ---------- 15. バランス：通しプレイ ----------
 // 腕のいい商人。人より有利な条件で遊ぶ：最初から国じゅうの地図を持ち、噂に頼らず、どの町の「今の本当の値」も知っている。
 // 3つ先の町までの道すじを比べ、帰りの商いまで見通して、1日あたりの利益がいちばん大きい荷と行き先を選ぶ。
 // maxCart より上の荷車は買わない。依頼・得意先・店・隣国・禁制品は使わない。
@@ -686,7 +904,7 @@ function play(seed, maxCart, maxDays, init) {
     const order = ['basket', 'handcart', 'donkey', 'horse'], top = order.indexOf(maxCart);
     const mark = {};
     let commit = null;   // 遠くの町へ運んでいる途中なら { path: 残りの道, keep: 売らずに運ぶ品 }
-    const stepOf = (t, gid) => 1 / (D.GOODS[gid].depth * D.TOWNS[t].size);
+    const stepOf = (t, gid) => g.step(t, gid);   // 産地に近い町は市場が薄い、も見こむ
     const far = (rid, t) => (D.ROADS[rid].a === t ? D.ROADS[rid].b : D.ROADS[rid].a);
     function leg(rid, t, first) {
       const s = S(), r = D.ROADS[rid], cart = D.CARTS[s.cart.type];
@@ -716,7 +934,8 @@ function play(seed, maxCart, maxDays, init) {
     // t0 を指定すると「その町に元手 money0・空き cap0 で着いたとしたら」の見積もりになる
     function plan(legs, t0, money0, cap0) {
       const s = S(), t = t0 || s.town, to = legs[legs.length - 1].to;
-      const days = legs.reduce((a, L) => a + L.days, 0), viaCity = legs.some((L) => L.to === 'oto');
+      // 禁制品は、王都を通らず、見回りのいる街道も通らない道すじでだけ扱う
+      const days = legs.reduce((a, L) => a + L.days, 0), viaCity = legs.some((L) => L.to === 'oto' || D.ROADS[L.rid].type === 'road');
       const reserve = (days + 1 >= g.daysLeft()) ? g.owed() : 0;
       const spoil = (D.CALENDAR.spoil && D.CALENDAR.spoil[g.seasonOf(e.days()).id]) || 1;
       let money = (t0 ? money0 : s.gold - reserve) - g.dailyCost().total * (days + 1) - 3, capW = t0 ? cap0 : g.freeWeight(), gain = 0, value = t0 ? 0 : g.cargoWorth();
@@ -768,16 +987,20 @@ function play(seed, maxCart, maxDays, init) {
       if (/壊れた/.test(txt)) return /直して|荷を/;
       return null;
     };
+    // 夜は出発できないので、朝まで休んでから出る
+    const depart = (rid) => { if (g.isNight()) { e.act('rest'); e.closeAll(); if (e.died != null) return; } e.travel(rid, onRoad); };
     let guard = 0;
     while (e.died == null && e.days() < maxDays && guard++ < 4000) {
+      if (g.isNight()) { e.act('rest'); e.closeAll(); continue; }
       const t = S().town, T = D.TOWNS[t];
+      if (TRACE) console.log(`    ${e.days()}日目 ${T.name} ${Math.round(S().gold)}枚 ${S().cart.type} 護衛${S().guards} 荷[${Object.keys(S().cargo).map((k) => k + S().cargo[k].qty).join(' ')}] 返済${S().loan.n}回 あと${g.daysLeft()}日で${g.owed()}枚${S().boss ? ' 頭:' + S().boss.rid : ''}`);
       mark.peak = Math.max(mark.peak || 0, Math.round(S().gold));
       for (const gid of Object.keys(S().cargo)) if (!g.banned(t, gid) && !(commit && commit.keep[gid])) e.qty('sell', { g: gid });
       e.closeAll(); if (e.died != null) break;
       if (T.has.cart) {
         if (S().cart.type !== 'basket' && S().cart.hp < 55) e.act('fix');
         const ix = order.indexOf(S().cart.type), next = order[ix + 1];
-        if (next && ix < top) {
+        if (next && ix < top && (!D.CARTS[next].only || D.CARTS[next].only.includes(t))) {
           // 返済日の直前には買わない。返済ぶんの一部と、仕入れの元手を残す
           const cost = D.CARTS[next].price - g.tradeIn(), keep = g.owed() * 0.4 + [60, 300, 600][ix];
           if (g.daysLeft() >= 16 && S().gold >= cost + keep) { e.act('buyCart', { id: next }); e.press(1); e.closeAll(); if (mark[next] == null) mark[next] = e.days(); }
@@ -809,7 +1032,7 @@ function play(seed, maxCart, maxDays, init) {
         const target = reach.sort((a, b) => g.DIST[t][a] - g.DIST[t][b])[0];
         const first = target && paths(t, 1).map((p) => p[0]).sort((a, b) => (a.days + g.DIST[a.to][target]) - (b.days + g.DIST[b.to][target]))[0];
         if (!first) { e.act('work'); e.closeAll(); continue; }
-        e.travel(first.rid, onRoad); e.closeAll(); continue;
+        depart(first.rid); e.closeAll(); continue;
       }
       for (const gid of Object.keys(best.cnt)) e.qty('buy', { g: gid }, best.cnt[gid]);
       e.closeAll(); if (e.died != null) break;
@@ -817,7 +1040,7 @@ function play(seed, maxCart, maxDays, init) {
         const keep = Object.assign({}, commit ? commit.keep : {}); for (const gid of Object.keys(best.cnt)) keep[gid] = true;
         commit = { path: best.legs.slice(1).map((L) => L.rid), keep };
       } else commit = null;
-      e.travel(best.legs[0].rid, onRoad);
+      depart(best.legs[0].rid);
       e.closeAll();
     }
     const s = S();
@@ -845,8 +1068,9 @@ function testBalance() {
   check('徒歩だけだと、完済にはほど遠い（8回のうち5回まで）', med(foot.map((x) => x.paid)) <= 5 && Math.max.apply(null, foot.map((x) => x.paid)) <= 6, `中央 ${med(foot.map((x) => x.paid))}回`);
   check('ただし最初の返済は、徒歩でも払える（出だしで詰まない）', foot.filter((x) => x.paid >= 1).length >= N * 0.75, `${foot.filter((x) => x.paid >= 1).length}/${N}`);
   check('手押し車に上がれば、徒歩より長く返済を続けられる', med(hand.map((x) => x.paid)) > med(foot.map((x) => x.paid)), `中央 ${med(foot.map((x) => x.paid))}回 → ${med(hand.map((x) => x.paid))}回`);
-  check('手押し車どまりでは完済できない（ロバや馬車に上がらないと厳しい）', hand.filter((x) => x.done).length <= N * 0.25, `完済 ${hand.filter((x) => x.done).length}/${N}`);
-  check('荷車を上げていけば、返済を続けて完済できる', full.filter((x) => x.done).length >= N * 0.5, `完済 ${full.filter((x) => x.done).length}/${N}`);
+  // 第5版は、遠くへ運ぶほど高く売れる。腕のいい商人なら手押し車でも完済に届くことがあるが、半分には届かない
+  check('手押し車どまりでは、完済できるのは半分に届かない（ロバや馬車に上がらないと厳しい）', hand.filter((x) => x.done).length < N * 0.5, `完済 ${hand.filter((x) => x.done).length}/${N}`);
+  check('荷車を上げていけば、返済を続けて完済できる（手押し車どまりより多い）', full.filter((x) => x.done).length >= N * 0.5 && full.filter((x) => x.done).length > hand.filter((x) => x.done).length, `完済 ${full.filter((x) => x.done).length}/${N}`);
   check('荷車を上げても、返済の進み方は手押し車どまりより上', med(full.map((x) => x.paid)) > med(hand.map((x) => x.paid)));
   check('腕のいい商人でも破産することがある（危険を感じる難しさ）', full.some((x) => x.dead), `破産 ${full.filter((x) => x.dead).length}/${N}`);
   const has = (re) => Object.keys(titles).some((k) => re.test(k));
@@ -866,7 +1090,7 @@ function testIsolation() {
 module.exports = { boot, fresh, play, knowAll, seeded };
 if (require.main === module) {
   const only = process.argv[2];
-  const tests = { data: testData, start: testStart, weight: testWeight, rumors: testRumors, calendar: testCalendar, journey: testJourney, reveal: testReveal, loan: testLoan, bandits: testBandits, orders: testOrders, rise: testRise, abroad: testAbroad, isolation: testIsolation, balance: testBalance };
+  const tests = { data: testData, start: testStart, weight: testWeight, rumors: testRumors, calendar: testCalendar, journey: testJourney, reveal: testReveal, loan: testLoan, bandits: testBandits, orders: testOrders, rise: testRise, abroad: testAbroad, merchant: testMerchant, v5: testV5, isolation: testIsolation, balance: testBalance };
   for (const k in tests) if (!only || only === k) tests[k]();
   console.log(fails ? `\n✗ 失敗 ${fails}件` : '\n✓ すべて合格');
   process.exit(fails ? 1 : 0);

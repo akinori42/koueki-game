@@ -5,6 +5,8 @@
 // base  : 1つあたりの基準の値段
 // depth : 市場の厚み。大きいほど、まとめて売買しても値段が動きにくい
 // shelf : 傷むまでの日数（無ければ傷まない）
+// cls   : 値段の型。bulk=重くて安い ／ mid=中ぐらい ／ lux=軽くて高い ／ contra=禁制品。
+//         産地でない町での値段が、産地からの道のりでどれだけ上がるかを決める（config.js の priceCurve）
 // lux   : true なら高級品（軽くて高い）。町による値段の差は小さく、在庫も少ない。
 //         値打ちが大きいので、山賊と国境の関税に狙われやすい
 // abroad: true なら隣国の品。隣国への道が開くまでは、噂にも頼みごとにも出ない
@@ -16,24 +18,24 @@ window.SHOKAI = window.SHOKAI || {};
 
 SHOKAI.GOODS = {
   // --- 重くて安い品（1kgあたり1〜4枚）---
-  grain:   { name: '麦',         icon: '🌾', unit: '袋', w: 10, base: 10,  depth: 400 },
-  salt:    { name: '塩',         icon: '🧂', unit: '袋', w: 10, base: 20,  depth: 300 },
-  wine:    { name: 'ワイン',     icon: '🍷', unit: '樽', w: 20, base: 46,  depth: 160 },
-  iron:    { name: '鉄',         icon: '⛓️', unit: '束', w: 20, base: 60,  depth: 150 },
-  fruit:   { name: '果物',       icon: '🍎', unit: '籠', w: 5,  base: 16,  depth: 200, shelf: 6 },
-  wool:    { name: '羊毛',       icon: '🐑', unit: '俵', w: 8,  base: 26,  depth: 220 },
-  fish:    { name: '魚',         icon: '🐟', unit: '籠', w: 5,  base: 18,  depth: 220, shelf: 5 },
+  grain:   { cls: 'bulk', name: '麦',         icon: '🌾', unit: '袋', w: 10, base: 10,  depth: 400 },
+  salt:    { cls: 'bulk', name: '塩',         icon: '🧂', unit: '袋', w: 10, base: 20,  depth: 300 },
+  wine:    { cls: 'bulk', name: 'ワイン',     icon: '🍷', unit: '樽', w: 20, base: 46,  depth: 160 },
+  iron:    { cls: 'bulk', name: '鉄',         icon: '⛓️', unit: '束', w: 20, base: 60,  depth: 150 },
+  fruit:   { cls: 'bulk', name: '果物',       icon: '🍎', unit: '籠', w: 5,  base: 16,  depth: 200, shelf: 6 },
+  wool:    { cls: 'bulk', name: '羊毛',       icon: '🐑', unit: '俵', w: 8,  base: 26,  depth: 220 },
+  fish:    { cls: 'bulk', name: '魚',         icon: '🐟', unit: '籠', w: 5,  base: 18,  depth: 220, shelf: 5 },
   // --- 中ぐらいの品（1kgあたり7〜8枚）---
-  honey:   { name: '蜂蜜',       icon: '🍯', unit: '壺', w: 5,  base: 40,  depth: 150 },
-  liquor:  { name: '火酒',       icon: '🔥', unit: '樽', w: 10, base: 70,  depth: 70 },    // 禁制品
-  sugar:   { name: '砂糖',       icon: '🍬', unit: '袋', w: 10, base: 80,  depth: 120, abroad: true },
+  honey:   { cls: 'mid', name: '蜂蜜',       icon: '🍯', unit: '壺', w: 5,  base: 40,  depth: 150 },
+  liquor:  { cls: 'contra', name: '火酒',       icon: '🔥', unit: '樽', w: 10, base: 70,  depth: 70 },    // 禁制品
+  sugar:   { cls: 'mid', name: '砂糖',       icon: '🍬', unit: '袋', w: 10, base: 80,  depth: 120, abroad: true },
   // --- 軽くて高い品（1kgあたり17〜200枚）---
-  linen:   { name: '亜麻布',     icon: '🧶', unit: '反', w: 3,  base: 50,  depth: 160, lux: true },
-  cloth:   { name: '毛織物',     icon: '🧵', unit: '反', w: 4,  base: 90,  depth: 100, lux: true },
-  carpet:  { name: '絨毯',       icon: '🧿', unit: '枚', w: 6,  base: 300, depth: 40,  lux: true, abroad: true },
-  pelt:    { name: '密猟の毛皮', icon: '🦌', unit: '枚', w: 2,  base: 110, depth: 50,  lux: true },  // 禁制品
-  tobacco: { name: '異国の煙草', icon: '🍂', unit: '包', w: 1,  base: 150, depth: 40,  lux: true },  // 禁制品
-  spice:   { name: '香辛料',     icon: '🌶️', unit: '袋', w: 1,  base: 200, depth: 50,  lux: true }
+  linen:   { cls: 'lux', name: '亜麻布',     icon: '🧶', unit: '反', w: 3,  base: 50,  depth: 160, lux: true },
+  cloth:   { cls: 'lux', name: '毛織物',     icon: '🧵', unit: '反', w: 4,  base: 90,  depth: 100, lux: true },
+  carpet:  { cls: 'lux', name: '絨毯',       icon: '🧿', unit: '枚', w: 6,  base: 300, depth: 40,  lux: true, abroad: true },
+  pelt:    { cls: 'contra', name: '密猟の毛皮', icon: '🦌', unit: '枚', w: 2,  base: 110, depth: 50,  lux: true },  // 禁制品
+  tobacco: { cls: 'contra', name: '異国の煙草', icon: '🍂', unit: '包', w: 1,  base: 150, depth: 40,  lux: true },  // 禁制品
+  spice:   { cls: 'lux', name: '香辛料',     icon: '🌶️', unit: '袋', w: 1,  base: 200, depth: 50,  lux: true }
 };
 
 // 王都の門と国境で取り締まられ、王都では売れない品

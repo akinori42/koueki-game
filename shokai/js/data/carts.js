@@ -8,6 +8,7 @@
 // breakP : 1回の移動で壊れる確率（道の種類ごと）
 // repair : 道中で壊れたときの修理代
 // gate   : 王都の門で払う入市税（荷車の大きさで決まる定額）
+// only   : 書いてあれば、その町の車屋でしか買えない（遠くの町にしかない品）
 // 荷車を足すときは、ここに1つ足すだけで車屋に並ぶ。
 window.SHOKAI = window.SHOKAI || {};
 
@@ -33,7 +34,7 @@ SHOKAI.CARTS = {
   horse: {
     name: '一頭立て馬車', icon: '🐴', cap: 700, price: 1600,
     speed: { road: 0.6, trail: 1.5, path: 1.4 }, feed: 5, guards: 4, flee: 0.6,
-    breakP: { road: 0.05, trail: 0.16, path: 0.14 }, repair: 90, gate: 10,
-    desc: '街道ではとても速く、たくさん積める。悪路に弱く、餌代が高い。'
+    breakP: { road: 0.05, trail: 0.16, path: 0.14 }, repair: 90, gate: 10, only: ['oto', 'mirza'],
+    desc: '街道ではとても速く、たくさん積める。悪路に弱く、餌代が高い。王都の車屋でしか買えない。'
   }
 };
