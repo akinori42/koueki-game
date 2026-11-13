@@ -75,6 +75,23 @@ details.card summary { font-weight: 700; padding: 6px 0; cursor: pointer; }
 .tag.bad { border-color: #a04a44; color: #f2907c; }
 .tag.good { border-color: #4f8a4b; color: #8fd68a; }
 .tag.gold { border-color: #b8862b; color: #e9b949; }
+
+/* 噂・暦 */
+.rumor { font-size: 14px; line-height: 1.6; padding: 6px 0; border-top: 1px dashed #5a4630; }
+.rumor b { color: #f3d98a; }
+.cal { font-size: 14px; padding: 4px 0; border-top: 1px dashed #5a4630; margin-top: 4px; }
+.chips { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+.chips button.b { min-width: 0; padding: 0 4px; font-size: 13px; }
+
+/* 答え合わせの札と、旅の決算 */
+.card.flip { transition: none; }
+.card.flip.closed { background: repeating-linear-gradient(45deg, #4a3826, #4a3826 8px, #54402a 8px, #54402a 16px); border-style: dashed; }
+.card.flip.good { border-color: #4f8a4b; }
+.card.flip.bad { border-color: #a04a44; }
+.big { font-size: 22px; font-weight: 700; flex-shrink: 0; min-width: 56px; text-align: right; }
+.card.tally { border-color: #e9b949; }
+.total { font-size: 20px; font-weight: 700; margin-top: 6px; }
+#scene, #home { touch-action: manipulation; }
 .roadlog { font-size: 14px; min-height: 60px; }
 
 #modal {
